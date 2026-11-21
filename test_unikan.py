@@ -353,7 +353,7 @@ class LongPoll(unittest.TestCase):
 
 
 class Update(unittest.TestCase):
-    """`unikan update` against a local HTTP server standing in for GitHub."""
+    """`unikan update` against a local HTTP server standing in for the GitHub API and raw files."""
     def setUp(self):
         import http.server, functools
         self.tmp = tempfile.TemporaryDirectory(); t = Path(self.tmp.name)
@@ -362,55 +362,73 @@ class Update(unittest.TestCase):
         self.me = self.app / "unikan.py"
         self.me.write_text(Path(UNIKAN).read_text())
         h = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(self.served))
+        h.log_message = lambda *a: None
         self.srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), h)
         threading.Thread(target=self.srv.serve_forever, daemon=True).start()
-        self.url = f"http://127.0.0.1:{self.srv.server_address[1]}/unikan.py"
+        self.base = f"http://127.0.0.1:{self.srv.server_address[1]}"
 
     def tearDown(self):
         self.srv.shutdown(); self.srv.server_close(); self.tmp.cleanup()
 
-    def serve(self, text):
-        (self.served / "unikan.py").write_text(text)
+    def publish(self, text, tag="v9.9.9"):
+        """Put a release on the fake GitHub: latest.json names the tag, raw/<tag>/unikan.py holds the file."""
+        (self.served / "latest.json").write_text(json.dumps({"tag_name": tag}))
+        d = self.served / "raw" / tag; d.mkdir(parents=True, exist_ok=True)
+        (d / "unikan.py").write_text(text)
 
     def run_update(self, *extra):
-        return subprocess.run([sys.executable, str(self.me), "update", *extra], capture_output=True, text=True,
-                              env=dict(os.environ, UNIKAN_UPDATE_URL=self.url))
+        env = dict(os.environ, UNIKAN_RELEASE_API=self.base + "/latest.json", UNIKAN_RAW_BASE=self.base + "/raw")
+        return subprocess.run([sys.executable, str(self.me), "update", *extra], capture_output=True, text=True, env=env)
 
     def newer(self, ver="9.9.9", extra="\n"):
         return re.sub(r'^VERSION = "[^"]+"', f'VERSION = "{ver}"', Path(UNIKAN).read_text(), count=1, flags=re.M) + extra
 
     def test_same_version_is_noop(self):
-        self.serve(Path(UNIKAN).read_text())
+        self.publish(Path(UNIKAN).read_text(), tag="v" + re.search(r'^VERSION = "([^"]+)"', Path(UNIKAN).read_text(), re.M).group(1))
         before = self.me.read_text()
         r = self.run_update()
         self.assertIn("already up to date", r.stdout); self.assertEqual(self.me.read_text(), before)
         self.assertFalse((self.app / "unikan.py.prev").exists())
 
     def test_check_does_not_replace(self):
-        self.serve(self.newer())
+        self.publish(self.newer())
         before = self.me.read_text()
         r = self.run_update("--check")
         self.assertIn("update available -> 9.9.9", r.stdout); self.assertEqual(self.me.read_text(), before)
 
     def test_update_replaces_and_keeps_prev(self):
         before = self.me.read_text()
-        self.serve(self.newer())
+        self.publish(self.newer())
         r = self.run_update()
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn('VERSION = "9.9.9"', self.me.read_text())
         self.assertEqual((self.app / "unikan.py.prev").read_text(), before)
         self.assertFalse((self.app / "unikan.py.new").exists())
 
+    def test_tag_must_match_file_version(self):
+        before = self.me.read_text()
+        self.publish(self.newer(ver="9.9.9"), tag="v8.8.8")
+        r = self.run_update()
+        self.assertNotEqual(r.returncode, 0); self.assertIn("refused", r.stderr)
+        self.assertEqual(self.me.read_text(), before)
+
+    def test_bad_tag_name_refused(self):
+        before = self.me.read_text()
+        self.publish(self.newer(), tag="../evil")
+        r = self.run_update()
+        self.assertNotEqual(r.returncode, 0); self.assertIn("unexpected release tag", r.stderr)
+        self.assertEqual(self.me.read_text(), before)
+
     def test_broken_update_is_refused(self):
         before = self.me.read_text()
-        self.serve(self.newer(extra="def broken(:\n"))
+        self.publish(self.newer(extra="def broken(:\n"))
         r = self.run_update()
         self.assertNotEqual(r.returncode, 0); self.assertIn("does not compile", r.stderr)
         self.assertEqual(self.me.read_text(), before)
 
     def test_file_without_version_is_refused(self):
         before = self.me.read_text()
-        self.serve("print('not unikan')\n")
+        self.publish("print('not unikan')\n")
         r = self.run_update()
         self.assertNotEqual(r.returncode, 0); self.assertIn("no VERSION", r.stderr)
         self.assertEqual(self.me.read_text(), before)

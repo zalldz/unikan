@@ -37,7 +37,8 @@ SECRETS = CONF_DIR / "secrets"
 COLS = ("backlog", "todo", "doing", "blocked", "done")
 ID_RE = re.compile(r"^[0-9a-f]{6}$")
 VERSION = "0.3.0"
-UPDATE_URL = os.environ.get("UNIKAN_UPDATE_URL", "https://raw.githubusercontent.com/zalldz/unikan/master/unikan.py")
+RELEASE_API = os.environ.get("UNIKAN_RELEASE_API", "https://api.github.com/repos/zalldz/unikan/releases/latest")
+RAW_BASE = os.environ.get("UNIKAN_RAW_BASE", "https://raw.githubusercontent.com/zalldz/unikan")
 MAX_UPDATE_BYTES = 512 * 1024
 MAX_BODY = 65536
 MAX_REWORK = 2
@@ -705,23 +706,36 @@ def demo_cmd(args) -> None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def update_cmd(args) -> None:
-    """Replace this file with the latest release from GitHub. Keeps the old one as .prev."""
-    me = Path(__file__).resolve()
+def _fetch(url: str, limit: int) -> bytes:
     try:
-        with urllib.request.urlopen(UPDATE_URL, timeout=20) as r:
-            src = r.read(MAX_UPDATE_BYTES + 1)
+        with urllib.request.urlopen(url, timeout=20) as r:
+            data = r.read(limit + 1)
     except (urllib.error.URLError, OSError) as e:
-        sys.exit(f"unikan: cannot reach update source ({e})")
-    if len(src) > MAX_UPDATE_BYTES:
-        sys.exit("unikan: update file too large, refused")
-    text = src.decode("utf-8", "replace")
+        sys.exit(f"unikan: cannot reach {url} ({e})")
+    if len(data) > limit:
+        sys.exit("unikan: download too large, refused")
+    return data
+
+
+def update_cmd(args) -> None:
+    """Install the latest published release (a git tag), never an unreleased commit.
+
+    The file must carry VERSION equal to its tag, so a tag cannot silently ship other code.
+    The previous copy is kept as unikan.py.prev.
+    """
+    me = Path(__file__).resolve()
+    tag = json.loads(_fetch(RELEASE_API, 64 * 1024))["tag_name"]
+    if not re.fullmatch(r"v\d+\.\d+\.\d+", tag):
+        sys.exit(f"unikan: unexpected release tag {tag!r}, refused")
+    text = _fetch(f"{RAW_BASE}/{tag}/unikan.py", MAX_UPDATE_BYTES).decode("utf-8", "replace")
     m = re.search(r'^VERSION = "([^"]+)"', text, re.M)
     if not m:
-        sys.exit("unikan: update file has no VERSION, refused")
+        sys.exit("unikan: release file has no VERSION, refused")
     new = m.group(1)
+    if new != tag[1:]:
+        sys.exit(f"unikan: tag {tag} contains VERSION {new}, refused")
     if new == VERSION:
-        return print(f"unikan {VERSION}: already up to date")
+        return print(f"unikan {VERSION}: already up to date (latest release {tag})")
     if args.check:
         return print(f"unikan {VERSION}: update available -> {new} (run: unikan update)")
     try:
