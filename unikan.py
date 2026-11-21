@@ -36,12 +36,18 @@ SECRETS = CONF_DIR / "secrets"
 
 COLS = ("backlog", "todo", "doing", "blocked", "done")
 ID_RE = re.compile(r"^[0-9a-f]{6}$")
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 RELEASE_API = os.environ.get("UNIKAN_RELEASE_API", "https://api.github.com/repos/zalldz/unikan/releases/latest")
 RAW_BASE = os.environ.get("UNIKAN_RAW_BASE", "https://raw.githubusercontent.com/zalldz/unikan")
 MAX_UPDATE_BYTES = 512 * 1024
 MAX_BODY = 65536
 MAX_REWORK = 2
+
+EVENT_TEXT = {
+    "done": "Selesai {id} oleh {actor}: {result}",
+    "blocked": "Terhambat {id} ({actor}): {question}",
+    "todo": "Diulang {id} ({actor}): {reason}",
+}
 
 DEFAULT_CFG = {
     "owner": "owner",               # the human; may do anything, creates cards
@@ -57,7 +63,8 @@ DEFAULT_CFG = {
     "wake_timeout": 1800,
     "reap_interval": 30,
     "notify": {},                   # agent -> argv list, "{id}" substituted
-    "serialize": [],                # agents whose wake commands never overlap (RAM)
+    "serialize": [],
+    "on_event": [],                 # e.g. ["python3", "/path/send.py", "{text}"]; empty = off                # agents whose wake commands never overlap (RAM)
 }
 
 
@@ -140,8 +147,8 @@ def _text(d: dict, key: str, limit: int, required: bool = False) -> str:
 
 
 class Board:
-    def __init__(self, cfg: dict, wake=None):
-        self.cfg, self.wake = cfg, wake
+    def __init__(self, cfg: dict, wake=None, event=None):
+        self.cfg, self.wake, self.event = cfg, wake, event
         self.workers, self.creators, _ = roles(cfg)
         self.owner = cfg["owner"]
 
@@ -220,6 +227,8 @@ class Board:
                 raise KBError(500, "could not allocate id")
         finally:
             c.close()
+        if self.event:
+            self.event(f"Kartu baru {cid} untuk {assignee}: {title}")
         if col == "todo" and self.wake:
             self.wake(assignee, cid)
         return self.get(cid)
@@ -292,6 +301,9 @@ class Board:
                 raise
         finally:
             c.close()
+        if self.event and (to in ("done", "blocked") or (to == "todo" and frm == "blocked")):
+            self.event(EVENT_TEXT[to].format(
+                id=cid, actor=actor, to=to, result=result[:300], question=question[:300], reason=reason[:300]))
         if to == "todo" and self.wake:
             self.wake(assignee, cid)
         return self.get(cid)
@@ -383,11 +395,25 @@ class Router:
 
     def __init__(self, cfg: dict):
         self.cfg = cfg
-        self.board = Board(cfg, wake=self.enqueue)
+        self.board = Board(cfg, wake=self.enqueue, event=self.emit)
         self.queues = {a: queue.Queue() for a in cfg["notify"]}
         self.heavy = threading.Lock()
         for a in self.queues:
             threading.Thread(target=self._worker, args=(a,), daemon=True, name=f"wake-{a}").start()
+
+    def emit(self, text: str) -> None:
+        """Send a short event line through the optional on_event command (e.g. a Telegram bot). Never blocks."""
+        argv_t = self.cfg.get("on_event")
+        if not argv_t:
+            return
+        argv = [a.replace("{text}", text) for a in argv_t]
+        threading.Thread(target=self._emit, args=(argv,), daemon=True).start()
+
+    def _emit(self, argv: list) -> None:
+        try:
+            subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, timeout=30)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            print(f"on_event failed: {e}", file=sys.stderr, flush=True)
 
     def enqueue(self, agent: str, cid: str) -> None:
         if agent in self.queues:

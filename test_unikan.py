@@ -348,6 +348,32 @@ class Delete(unittest.TestCase):
         c = db_sqlite(e)
         self.assertEqual(c.execute("SELECT COUNT(*) FROM events WHERE card=?", (cid,)).fetchone()[0], 0)
 
+class Events(unittest.TestCase):
+    def test_events_fire_for_create_done_blocked_requeue_only(self):
+        tmp = tempfile.mkdtemp(); log = Path(tmp) / "events.txt"
+        e = Env(on_event=["sh", "-c", f'echo "$0" >> {log}', "{text}"])
+        try:
+            cid = e.add("alice")                              # create -> event
+            e.mv("lead", cid, "backlog")                      # not an event (todo->backlog)
+            e.mv("lead", cid, "todo")                         # backlog->todo: promote, no event
+            e.mv("alice", cid, "doing")                       # claim, no event
+            e.mv("alice", cid, "blocked", question="butuh API key")   # event
+            e.mv("lead", cid, "todo", reason="coba lagi")     # requeue -> event
+            e.mv("alice", cid, "doing")
+            e.mv("alice", cid, "done", result="beres")        # event
+            for _ in range(40):
+                time.sleep(0.1)
+                if log.exists() and len(log.read_text().splitlines()) >= 4: break
+            lines = log.read_text().splitlines()
+            self.assertEqual(len(lines), 4, lines)
+            self.assertTrue(lines[0].startswith("Kartu baru"))
+            self.assertIn("Terhambat", lines[1]); self.assertIn("butuh API key", lines[1])
+            self.assertIn("Diulang", lines[2]); self.assertIn("coba lagi", lines[2])
+            self.assertIn("Selesai", lines[3]); self.assertIn("beres", lines[3])
+        finally:
+            e.close()
+
+
 class LongPoll(unittest.TestCase):
     @classmethod
     def setUpClass(cls): cls.e = Env()
