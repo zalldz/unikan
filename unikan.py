@@ -36,7 +36,7 @@ SECRETS = CONF_DIR / "secrets"
 
 COLS = ("backlog", "todo", "doing", "blocked", "done")
 ID_RE = re.compile(r"^[0-9a-f]{6}$")
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 RELEASE_API = os.environ.get("UNIKAN_RELEASE_API", "https://api.github.com/repos/zalldz/unikan/releases/latest")
 RAW_BASE = os.environ.get("UNIKAN_RAW_BASE", "https://raw.githubusercontent.com/zalldz/unikan")
 MAX_UPDATE_BYTES = 512 * 1024
@@ -51,6 +51,7 @@ EVENT_TEXT = {
 
 DEFAULT_CFG = {
     "owner": "owner",               # the human; may do anything, creates cards
+    "viewers": ["viewer"],          # read-only names: may GET the board, cannot create or move cards
     "bosses": [],                   # extra names allowed to create cards and requeue
     "agents": ["worker-a", "worker-b"],  # workers: only move their own cards
     "bind": ["127.0.0.1"],          # extra tailnet address goes here
@@ -72,7 +73,7 @@ def roles(cfg: dict) -> tuple[list, list, list]:
     """(workers, creators, all names). The owner is always a creator; "system" is internal only."""
     workers = list(cfg["agents"])
     creators = list(cfg["bosses"]) + [cfg["owner"]]
-    return workers, creators, workers + creators
+    return workers, creators, workers + creators + list(cfg.get("viewers", []))
 
 
 def load_cfg() -> dict:
@@ -493,6 +494,64 @@ def who(token: str, cfg: dict) -> str | None:
     return found
 
 
+VIEW_HTML = """<!doctype html><html lang="id"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>unikan</title>
+<style>
+:root{color-scheme:light dark;--bg:#f6f7f9;--fg:#1b1f24;--card:#fff;--line:#d8dde3;--mute:#6b7785}
+@media (prefers-color-scheme:dark){:root{--bg:#15181c;--fg:#e6e9ed;--card:#1f242b;--line:#2e353e;--mute:#8b96a3}}
+body{margin:0;padding:12px;font:15px/1.4 system-ui,sans-serif;background:var(--bg);color:var(--fg)}
+h1{font-size:18px;margin:0 0 8px}.top{display:flex;gap:8px;align-items:center;justify-content:space-between;flex-wrap:wrap}
+.cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;margin-top:10px}
+.col h2{font-size:13px;text-transform:uppercase;color:var(--mute);margin:4px 0}
+.card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:8px;margin-bottom:8px}
+.route{font-weight:600}.meta{color:var(--mute);font-size:13px}.note{font-size:13px;margin-top:4px;white-space:pre-wrap}
+.blocked{border-color:#c0392b}.empty{color:var(--mute);font-size:13px}
+button,input{font:inherit;padding:6px 10px}
+</style></head><body>
+<div class="top"><h1>unikan — papan tim</h1><span class="meta" id="status"></span>
+<button id="forget" hidden>Ganti token</button></div>
+<div id="login" hidden>
+  <p class="meta">Masukkan token viewer (hanya baca). Disimpan di browser ini saja.</p>
+  <input id="tok" type="password" placeholder="token viewer" autocomplete="off">
+  <button id="go">Buka</button>
+</div>
+<div class="cols" id="board"></div>
+<script>
+const COLS=[["backlog","Backlog"],["todo","Todo"],["doing","Sedang dikerjakan"],["blocked","Terhambat"],["done","Selesai"]];
+const $=id=>document.getElementById(id);
+function el(tag,cls,text){const e=document.createElement(tag);if(cls)e.className=cls;if(text!=null)e.textContent=text;return e}
+function show(){$("login").hidden=true;$("forget").hidden=false}
+async function load(){
+  const t=localStorage.getItem("unikan-token");
+  if(!t){$("login").hidden=false;$("forget").hidden=true;return}
+  let r;
+  try{r=await fetch("/cards",{headers:{Authorization:"Bearer "+t}})}catch(e){$("status").textContent="server tidak terjangkau";return}
+  if(r.status===401){localStorage.removeItem("unikan-token");$("status").textContent="token salah";$("login").hidden=false;return}
+  const cards=await r.json();show();
+  const board=$("board");board.textContent="";
+  for(const [key,label] of COLS){
+    const col=el("div","col");col.appendChild(el("h2",null,label+" ("+cards.filter(c=>c.column===key).length+")"));
+    for(const c of cards.filter(c=>c.column===key)){
+      const box=el("div","card"+(key==="blocked"?" blocked":""));
+      box.appendChild(el("div","route",c.created_by+" → "+c.assignee));
+      box.appendChild(el("div",null,c.title));
+      box.appendChild(el("div","meta",c.id+" · "+new Date(c.updated*1000).toLocaleString("id-ID")));
+      const note=c.question||c.result;
+      if(note)box.appendChild(el("div","note",note));
+      col.appendChild(box);
+    }
+    if(!cards.some(c=>c.column===key))col.appendChild(el("div","empty","kosong"));
+    board.appendChild(col);
+  }
+  $("status").textContent="diperbarui "+new Date().toLocaleTimeString("id-ID");
+}
+$("go").onclick=()=>{const v=$("tok").value.trim();if(v){localStorage.setItem("unikan-token",v);$("tok").value="";load()}};
+$("forget").onclick=()=>{localStorage.removeItem("unikan-token");load()};
+load();setInterval(()=>{if(localStorage.getItem("unikan-token"))load()},10000);
+</script></body></html>
+"""
+
+
 def make_handler(board: Board):
     class H(BaseHTTPRequestHandler):
         server_version = "unikan"
@@ -526,6 +585,14 @@ def make_handler(board: Board):
             try:
                 u = urlsplit(self.path)
                 parts = [p for p in u.path.split("/") if p]
+                if method == "GET" and parts == ["view"]:
+                    data = VIEW_HTML.encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html; charset=utf-8")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.send_header("Cache-Control", "no-store")
+                    self.end_headers()
+                    return self.wfile.write(data)
                 if method == "GET" and parts == ["health"]:
                     return self._send(200, {"ok": True})
                 auth = self.headers.get("Authorization", "")

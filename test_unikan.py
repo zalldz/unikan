@@ -30,7 +30,7 @@ class Env:
         (self.conf / "config.json").write_text(json.dumps(cfg))
         self.env = dict(os.environ, UNIKAN_CONF=str(self.conf), UNIKAN_DATA=str(self.data))
         self.env.pop("UNIKAN_TOKEN", None); self.env.pop("UNIKAN_AS", None)
-        for n in ("lead", "alice", "bob", "carol", "owner"):  # token names must match config
+        for n in ("lead", "alice", "bob", "carol", "owner", "viewer"):  # token names must match config
             subprocess.run([sys.executable, UNIKAN, "token", "new", n], env=self.env, check=True, capture_output=True)
         self.proc = None
         self.start()
@@ -503,6 +503,33 @@ class Restore(unittest.TestCase):
             c.close()
         finally:
             e.close()
+
+
+class View(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls): cls.e = Env()
+    @classmethod
+    def tearDownClass(cls): cls.e.close()
+
+    def test_page_is_public_but_holds_no_data(self):
+        with urllib.request.urlopen(self.e.url + "/view", timeout=5) as r:
+            body = r.read().decode()
+            self.assertIn("text/html", r.headers["Content-Type"])
+        self.assertIn("unikan", body)
+        self.assertNotIn("Bearer " + self.e.tok("owner"), body)
+
+    def test_viewer_reads_but_cannot_change(self):
+        e = self.e
+        cid = e.add("alice", title="<img src=x onerror=alert(1)>")
+        self.assertEqual(e.req("viewer", "GET", "/cards")[0], 200)
+        self.assertEqual(e.req("viewer", "POST", "/cards", {"title": "x", "assignee": "alice"})[0], 403)
+        self.assertEqual(e.mv("viewer", cid, "doing")[0], 403)
+        self.assertEqual(e.req("viewer", "DELETE", f"/cards/{cid}")[0], 403)
+        self.assertEqual(e.req("alice", "GET", f"/cards/{cid}")[1]["column"], "todo")
+        self.assertEqual(e.req("viewer", "GET", f"/cards/{cid}")[1]["title"], "<img src=x onerror=alert(1)>")
+
+    def test_viewer_cannot_be_assigned_work(self):
+        self.assertEqual(self.e.req("lead", "POST", "/cards", {"title": "x", "assignee": "viewer"})[0], 400)
 
 
 if __name__ == "__main__":
