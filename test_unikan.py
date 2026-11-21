@@ -546,5 +546,44 @@ class Meta(unittest.TestCase):
         self.assertEqual(self.e.req(None, "GET", "/meta", token="nope")[0], 401)
 
 
+class Live(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls): cls.e = Env()
+    @classmethod
+    def tearDownClass(cls): cls.e.close()
+
+    def test_activity_lists_recent_events_with_titles(self):
+        e = self.e
+        cid = e.add("alice", title="Riset aktivitas")
+        e.mv("alice", cid, "doing")
+        s, rows = e.req("owner", "GET", "/activity?limit=5")
+        self.assertEqual(s, 200)
+        self.assertEqual(rows[0]["title"], "Riset aktivitas")
+        self.assertEqual((rows[0]["actor"], rows[0]["to"]), ("alice", "doing"))
+        self.assertEqual(e.req("owner", "GET", "/activity?limit=zz")[0], 400)
+
+    def test_stream_pushes_a_change_event_after_a_write(self):
+        e = self.e
+        cid = e.add("bob")
+        r = urllib.request.urlopen(urllib.request.Request(
+            e.url + "/stream", headers={"Authorization": "Bearer " + e.tok("owner")}), timeout=20)
+        def write_later():
+            time.sleep(1); e.mv("bob", cid, "doing")
+        threading.Thread(target=write_later, daemon=True).start()
+        t0, got = time.time(), False
+        while time.time() - t0 < 15:
+            line = r.readline().decode()
+            if line.startswith("event: change"):
+                got = True; break
+        r.close()
+        self.assertTrue(got, "no change event within 15s")
+        self.assertLess(time.time() - t0, 10)
+
+    def test_stream_requires_token(self):
+        with self.assertRaises(urllib.error.HTTPError) as cm:
+            urllib.request.urlopen(self.e.url + "/stream", timeout=5)
+        self.assertEqual(cm.exception.code, 401)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

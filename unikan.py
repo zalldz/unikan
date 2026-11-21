@@ -36,7 +36,7 @@ SECRETS = CONF_DIR / "secrets"
 
 COLS = ("backlog", "todo", "doing", "blocked", "done")
 ID_RE = re.compile(r"^[0-9a-f]{6}$")
-VERSION = "0.7.0"
+VERSION = "0.8.0"
 RELEASE_API = os.environ.get("UNIKAN_RELEASE_API", "https://api.github.com/repos/zalldz/unikan/releases/latest")
 RAW_BASE = os.environ.get("UNIKAN_RAW_BASE", "https://raw.githubusercontent.com/zalldz/unikan")
 MAX_UPDATE_BYTES = 512 * 1024
@@ -147,6 +147,17 @@ def _text(d: dict, key: str, limit: int, required: bool = False) -> str:
     return v
 
 
+_CHANGE = threading.Condition()
+_VER = [0]
+_LIVE = threading.BoundedSemaphore(20)  # max open live streams
+
+
+def _changed() -> None:
+    with _CHANGE:
+        _VER[0] += 1
+        _CHANGE.notify_all()
+
+
 class Board:
     def __init__(self, cfg: dict, wake=None, event=None):
         self.cfg, self.wake, self.event = cfg, wake, event
@@ -232,6 +243,7 @@ class Board:
             self.event(f"Kartu baru {cid} untuk {assignee}: {title}")
         if col == "todo" and self.wake:
             self.wake(assignee, cid)
+        _changed()
         return self.get(cid)
 
     def move(self, actor: str, cid: str, to: str, d: dict | None = None) -> dict:
@@ -307,6 +319,7 @@ class Board:
                 id=cid, actor=actor, to=to, result=result[:300], question=question[:300], reason=reason[:300]))
         if to == "todo" and self.wake:
             self.wake(assignee, cid)
+        _changed()
         return self.get(cid)
 
     def delete(self, actor: str, cid: str) -> dict:
@@ -322,7 +335,17 @@ class Board:
             c.execute("COMMIT")
         finally:
             c.close()
+        _changed()
         return {"deleted": cid}
+
+    def activity(self, limit: int) -> list[dict]:
+        c = db()
+        try:
+            rows = c.execute('''SELECT e.ts, e.actor, e.frm, e."to", e.note, e.card, c.title
+                FROM events e LEFT JOIN cards c ON c.id = e.card ORDER BY e.n DESC LIMIT ?''', (limit,))
+            return [dict(r) for r in rows]
+        finally:
+            c.close()
 
     def touch(self, actor: str, cid: str) -> dict:
         c = db()
@@ -337,6 +360,7 @@ class Board:
             c.execute("COMMIT")
         finally:
             c.close()
+        _changed()
         return self.get(cid)
 
     def stats(self) -> dict:
@@ -496,52 +520,84 @@ def who(token: str, cfg: dict) -> str | None:
 
 VIEW_HTML = r"""<!doctype html>
 <html lang="id"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
 <title>unikan</title>
 <style>
-:root{color-scheme:light dark;--bg:#f4f6f8;--fg:#17202a;--card:#fff;--line:#d5dce3;--mute:#5f6b78;--accent:#1f6feb;--danger:#c0392b;--ok:#1e8449;--warn:#b9770e}
-@media (prefers-color-scheme:dark){:root{--bg:#121519;--fg:#e8ecf0;--card:#1d232b;--line:#2f3945;--mute:#9aa6b2;--accent:#58a6ff;--danger:#ff7b72;--ok:#56d364;--warn:#e3b341}}
+:root{--bg:#f3f5f8;--fg:#18202b;--card:#ffffff;--line:#dbe1e8;--mute:#5d6977;--accent:#2563eb;--red:#c2410c;--green:#15803d;--amber:#a16207;--chip:#e8edf3;--shadow:0 1px 2px rgba(15,23,42,.06)}
+@media (prefers-color-scheme:dark){:root{--bg:#0f1318;--fg:#e7ecf2;--card:#181e26;--line:#2a3340;--mute:#94a0ae;--accent:#60a5fa;--red:#fb923c;--green:#4ade80;--amber:#fbbf24;--chip:#222a35;--shadow:none}}
 *{box-sizing:border-box}
-body{margin:0;font:16px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif;background:var(--bg);color:var(--fg);padding-bottom:24px}
-header{position:sticky;top:0;z-index:5;background:var(--bg);border-bottom:1px solid var(--line);padding:10px 14px;display:flex;justify-content:space-between;align-items:center;gap:8px}
-h1{font-size:19px;margin:0}
-.who{font-size:13px;color:var(--mute)}
-main{padding:12px 14px;max-width:900px;margin:0 auto}
-.help{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px;margin-bottom:12px;font-size:15px}
-.help b{display:block;margin-bottom:4px}
-section.col{margin-top:18px}
-section.col h2{font-size:17px;margin:0 0 4px;display:flex;justify-content:space-between}
-section.col p.desc{margin:0 0 8px;color:var(--mute);font-size:14px}
-.card{background:var(--card);border:1px solid var(--line);border-left:5px solid var(--accent);border-radius:12px;padding:12px;margin-bottom:10px}
-.card.blocked{border-left-color:var(--danger)}.card.done{border-left-color:var(--ok);opacity:.85}.card.doing{border-left-color:var(--warn)}
-.title{font-size:17px;font-weight:600;margin-bottom:4px;word-break:break-word}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--fg);padding-bottom:env(safe-area-inset-bottom)}
+header{position:sticky;top:0;z-index:5;background:var(--bg);border-bottom:1px solid var(--line);padding:10px max(14px,env(safe-area-inset-left)) 10px}
+.bar{display:flex;align-items:center;gap:10px;justify-content:space-between;max-width:1400px;margin:0 auto}
+h1{font-size:19px;margin:0;line-height:1.2}
+.sub{font-size:13px;color:var(--mute)}
+.live{display:inline-flex;align-items:center;gap:6px;font-size:13px;color:var(--mute);white-space:nowrap}
+.dot{width:9px;height:9px;border-radius:50%;background:var(--mute);display:inline-block}
+.live.on .dot{background:var(--green);box-shadow:0 0 0 3px rgba(21,128,61,.2)}
+main{max-width:1400px;margin:0 auto;padding:12px max(14px,env(safe-area-inset-left)) 40px}
+.chips{display:flex;flex-wrap:wrap;gap:8px;margin:4px 0 12px}
+.chip{background:var(--chip);border-radius:999px;padding:6px 12px;font-size:14px;white-space:nowrap}
+.chip b{font-size:16px;margin-right:4px}
+.chip.red{color:var(--red)}.chip.amber{color:var(--amber)}.chip.green{color:var(--green)}
+.people{font-size:14px;color:var(--mute);margin:0 0 12px}
+.people b{color:var(--fg)}
+.help{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:10px 12px;margin-bottom:12px;font-size:15px;box-shadow:var(--shadow)}
+.help b{display:block}
+.grid{display:grid;gap:14px;grid-template-columns:1fr}
+@media (min-width:820px){.grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (min-width:1180px){.grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
+.col{min-width:0}
+.col h2{font-size:16px;margin:4px 2px 2px;display:flex;justify-content:space-between;align-items:baseline}
+.col h2 span{font-size:14px;color:var(--mute);font-weight:500}
+.col p{margin:0 2px 8px;color:var(--mute);font-size:13px}
+.empty{color:var(--mute);font-size:14px;padding:10px 4px;border:1px dashed var(--line);border-radius:10px;text-align:center}
+.card{background:var(--card);border:1px solid var(--line);border-left:5px solid var(--accent);border-radius:12px;margin-bottom:10px;box-shadow:var(--shadow)}
+.card.blocked{border-left-color:var(--red)}.card.doing{border-left-color:var(--amber)}.card.done{border-left-color:var(--green)}.card.backlog{border-left-style:dashed}
+.head{all:unset;box-sizing:border-box;cursor:pointer;display:flex;gap:10px;align-items:center;width:100%;padding:12px 12px;min-height:52px}
+.head:focus-visible{outline:2px solid var(--accent);outline-offset:-2px;border-radius:12px}
+.title{flex:1;font-size:16px;font-weight:600;overflow-wrap:anywhere}
+.chev{color:var(--mute);transition:transform .15s;font-size:14px}
+.card.folded .chev{transform:rotate(-90deg)}
+.body{padding:0 12px 12px}
+.card.folded .body{display:none}
 .line{font-size:14px;color:var(--mute);margin:2px 0}
-.note{margin:8px 0 0;padding:8px 10px;border-radius:8px;background:rgba(127,127,127,.12);font-size:15px;white-space:pre-wrap;word-break:break-word}
-.actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+.note{margin:8px 0 0;padding:9px 11px;border-radius:9px;background:var(--chip);font-size:15px;white-space:pre-wrap;overflow-wrap:anywhere}
+.actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
 button{font:inherit;min-height:44px;padding:8px 14px;border-radius:10px;border:1px solid var(--line);background:var(--card);color:var(--fg);cursor:pointer}
 button.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
-button.danger{color:var(--danger)}
+button.danger{color:var(--red)}
 button:disabled{opacity:.5}
 input,textarea,select{font:inherit;width:100%;min-height:44px;padding:8px 10px;border-radius:10px;border:1px solid var(--line);background:var(--card);color:var(--fg)}
-textarea{min-height:80px}
-label{display:block;font-size:14px;color:var(--mute);margin:10px 0 4px}
-.empty{color:var(--mute);font-size:14px;padding:6px 0}
-.hd{display:flex;gap:8px}
-dialog{width:min(480px,92vw);border:1px solid var(--line);border-radius:14px;background:var(--card);color:var(--fg);padding:16px}
-dialog::backdrop{background:rgba(0,0,0,.45)}
-.row{display:flex;gap:8px;justify-content:flex-end;margin-top:14px;flex-wrap:wrap}
-.toast{position:fixed;left:50%;transform:translateX(-50%);bottom:90px;background:#222;color:#fff;padding:10px 14px;border-radius:10px;font-size:15px;max-width:92vw;z-index:9}
+textarea{min-height:84px}
+label{display:block;font-size:14px;color:var(--mute);margin:12px 0 4px}
 .check{display:flex;gap:8px;align-items:center;margin-top:10px;font-size:14px;color:var(--mute)}
 .check input{width:auto;min-height:0}
+.row{display:flex;gap:8px;justify-content:flex-end;margin-top:16px;flex-wrap:wrap}
+details.feed{margin-top:22px;background:var(--card);border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow)}
+details.feed summary{cursor:pointer;padding:12px;min-height:48px;font-weight:600;list-style:none}
+details.feed ul{list-style:none;margin:0;padding:0 12px 12px}
+details.feed li{padding:8px 0;border-top:1px solid var(--line);font-size:14px}
+details.feed li small{color:var(--mute);display:block}
+dialog{width:min(480px,94vw);border:1px solid var(--line);border-radius:14px;background:var(--card);color:var(--fg);padding:18px}
+dialog::backdrop{background:rgba(0,0,0,.45)}
+.toast{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(16px + env(safe-area-inset-bottom));background:#1f2937;color:#fff;padding:10px 16px;border-radius:10px;font-size:15px;max-width:92vw;z-index:9;box-shadow:0 4px 16px rgba(0,0,0,.25)}
+.tools{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
 </style></head>
 <body>
-<header>
-  <div><h1>unikan</h1><div class="who" id="who">papan tim</div></div>
-  <div class="hd"><button class="primary" id="new" hidden>+ Tugas</button><button id="logout" hidden>Keluar</button></div>
-</header>
+<header><div class="bar">
+  <div><h1>unikan</h1><div class="sub" id="who">papan tim</div></div>
+  <div class="tools">
+    <span class="live" id="live"><span class="dot"></span><span id="livetxt">menyambung…</span></span>
+    <button class="primary" id="new" hidden>+ Tugas</button>
+    <button id="logout" hidden>Keluar</button>
+  </div>
+</div></header>
 <main>
   <div id="login" hidden>
-    <div class="help"><b>Masuk</b>Masukkan token yang diberikan kepadamu. Token hanya disimpan di perangkat ini.</div>
+    <div class="help"><b>Masuk</b>Masukkan token yang diberikan kepadamu. Token hanya tersimpan di perangkat ini jika kamu mencentangnya.</div>
     <label for="tok">Token</label>
     <input id="tok" type="password" autocomplete="off" placeholder="tempel token di sini">
     <div class="check"><input id="remember" type="checkbox"><label for="remember" style="margin:0">Ingat di perangkat ini</label></div>
@@ -549,144 +605,203 @@ dialog::backdrop{background:rgba(0,0,0,.45)}
   </div>
   <div id="app" hidden>
     <div class="help" id="guide"></div>
-    <div id="board"></div>
+    <div class="chips" id="chips"></div>
+    <p class="people" id="people"></p>
+    <div class="grid" id="board"></div>
+    <details class="feed" id="feed"><summary>Aktivitas terbaru</summary><ul id="acts"></ul></details>
   </div>
 </main>
 
-
-<dialog id="dlg">
-  <form method="dialog" id="form">
-    <h2 style="margin:0 0 6px;font-size:19px">Buat tugas baru</h2>
-    <label for="f-title">Judul tugas</label>
-    <input id="f-title" required maxlength="200" placeholder="contoh: Rangkum berita hari ini">
-    <label for="f-to">Untuk siapa?</label>
-    <select id="f-to"></select>
-    <label for="f-body">Penjelasan (opsional)</label>
-    <textarea id="f-body" maxlength="8000" placeholder="Apa yang harus dikerjakan, batasannya apa"></textarea>
-    <label for="f-check">Cara mengecek selesai (opsional)</label>
-    <input id="f-check" maxlength="1000" placeholder="contoh: hasil berisi 5 poin">
-    <div class="check"><input id="f-backlog" type="checkbox"><label for="f-backlog" style="margin:0">Simpan dulu sebagai ide, belum dikerjakan</label></div>
-    <div class="row">
-      <button value="cancel" formnovalidate>Batal</button>
-      <button class="primary" value="ok" id="f-save">Simpan</button>
-    </div>
-  </form>
-</dialog>
+<dialog id="dlg"><form method="dialog" id="form">
+  <h2 style="margin:0 0 6px;font-size:19px">Buat tugas baru</h2>
+  <label for="f-title">Judul tugas</label>
+  <input id="f-title" required maxlength="200" placeholder="contoh: Rangkum berita hari ini">
+  <label for="f-to">Untuk siapa?</label>
+  <select id="f-to"></select>
+  <label for="f-body">Penjelasan (opsional)</label>
+  <textarea id="f-body" maxlength="8000" placeholder="Apa yang harus dikerjakan dan batasannya"></textarea>
+  <label for="f-check">Cara mengecek selesai (opsional)</label>
+  <input id="f-check" maxlength="1000" placeholder="contoh: hasil berisi 5 poin">
+  <div class="check"><input id="f-backlog" type="checkbox"><label for="f-backlog" style="margin:0">Simpan dulu sebagai ide</label></div>
+  <div class="row"><button value="cancel" formnovalidate>Batal</button><button class="primary" value="ok">Simpan</button></div>
+</form></dialog>
 <div class="toast" id="toast" hidden></div>
 
 <script>
-const KEY="unikan-token";
+const KEY="unikan-token", FOLD="unikan-folded";
 const COLS=[
-  ["doing","Sedang dikerjakan","Ada yang sedang mengerjakan ini sekarang."],
-  ["todo","Menunggu dikerjakan","Sudah siap, tinggal menunggu giliran."],
-  ["blocked","Butuh perhatian","Macet. Biasanya ada pertanyaan yang perlu dijawab owner."],
+  ["blocked","Butuh perhatian","Macet. Biasanya ada pertanyaan untuk owner."],
+  ["doing","Sedang dikerjakan","Sedang ditangani sekarang."],
+  ["todo","Menunggu dikerjakan","Sudah siap, menunggu giliran."],
   ["backlog","Ide","Belum dijadwalkan. Owner bisa menjadikannya tugas."],
-  ["done","Selesai","Sudah beres. Hasilnya ada di kartu."]];
+  ["done","Selesai","Sudah beres. Dilipat supaya ringkas; ketuk untuk membuka."]];
 const $=id=>document.getElementById(id);
-let ME=null, token=null;
+let ME=null, token=null, lastSig="", live=false, folded={};
+try{folded=JSON.parse(localStorage.getItem(FOLD)||"{}")}catch(e){folded={}}
 
 function tok(){return sessionStorage.getItem(KEY)||localStorage.getItem(KEY)}
-function remember(v){
-  sessionStorage.removeItem(KEY); localStorage.removeItem(KEY);
-  (v?localStorage:sessionStorage).setItem(KEY,token);
-}
 function el(tag,cls,text){const e=document.createElement(tag);if(cls)e.className=cls;if(text!=null)e.textContent=text;return e}
-let toastTimer;
-function toast(msg){const t=$("toast");t.textContent=msg;t.hidden=false;clearTimeout(toastTimer);toastTimer=setTimeout(()=>t.hidden=true,3500)}
+let tt;function toast(m){const t=$("toast");t.textContent=m;t.hidden=false;clearTimeout(tt);tt=setTimeout(()=>t.hidden=true,3500)}
+function ago(ts){const d=Math.max(0,Date.now()/1000-ts);if(d<45)return"baru saja";if(d<3600)return Math.round(d/60)+" menit lalu";if(d<86400)return Math.round(d/3600)+" jam lalu";return Math.round(d/86400)+" hari lalu"}
+function clock(ts){return new Date(ts*1000).toLocaleString("id-ID",{day:"numeric",month:"short",hour:"2-digit",minute:"2-digit"})}
 
 async function api(path,opts={}){
   const r=await fetch(path,{...opts,headers:{Authorization:"Bearer "+token,"Content-Type":"application/json"}});
-  let data=null; try{data=await r.json()}catch(e){}
+  let data=null;try{data=await r.json()}catch(e){}
   if(!r.ok){const err=new Error((data&&data.error)||("gagal ("+r.status+")"));err.status=r.status;throw err}
   return data;
 }
-function ago(ts){
-  const d=Math.max(0,Date.now()/1000-ts);
-  if(d<60)return "baru saja"; if(d<3600)return Math.floor(d/60)+" menit lalu";
-  if(d<86400)return Math.floor(d/3600)+" jam lalu"; return Math.floor(d/86400)+" hari lalu";
-}
+const isOwner=()=>ME&&ME.you===ME.owner;
+
 function sentence(c){
-  if(c.column==="done")return c.created_by+" memberi tugas ke "+c.assignee+". Selesai.";
-  if(c.column==="doing")return c.assignee+" sedang mengerjakan tugas dari "+c.created_by+".";
-  if(c.column==="blocked")return c.assignee+" tidak bisa lanjut. Ada pertanyaan:";
-  if(c.column==="todo")return "Dari "+c.created_by+" untuk "+c.assignee+". Belum dimulai.";
-  return "Ide dari "+c.created_by+(c.assignee?" (untuk "+c.assignee+")":"")+".";
+  switch(c.column){
+    case"done":return c.created_by+" memberi tugas ke "+c.assignee+". Selesai.";
+    case"doing":return c.assignee+" sedang mengerjakan tugas dari "+c.created_by+".";
+    case"blocked":return c.assignee+" berhenti dan butuh jawaban:";
+    case"todo":return"Dari "+c.created_by+" untuk "+c.assignee+". Belum dimulai.";
+    default:return"Ide dari "+c.created_by+(c.assignee?" (untuk "+c.assignee+")":"")+".";
+  }
 }
+function isFolded(c){return c.id in folded?folded[c.id]:c.column==="done"}
+function toggle(c){folded[c.id]=!isFolded(c);localStorage.setItem(FOLD,JSON.stringify(folded));render(lastData)}
 
 function button(label,cls,fn){const b=el("button",cls,label);b.onclick=async()=>{b.disabled=true;try{await fn()}catch(e){toast(e.message)}b.disabled=false};return b}
-async function move(id,to,body){await api("/cards/"+id+"/move",{method:"POST",body:JSON.stringify({to,...body})});toast("Berhasil");await load()}
+async function move(id,to,body){await api("/cards/"+id+"/move",{method:"POST",body:JSON.stringify({to,...body})});toast("Berhasil");load()}
 
 function cardEl(c){
-  const isOwner=ME.you===ME.owner;
-  const box=el("div","card "+c.column);
-  box.appendChild(el("div","title",c.title));
-  box.appendChild(el("div","line",sentence(c)));
-  if(c.column==="blocked"&&c.question)box.appendChild(el("div","note",c.question));
-  else if(c.column==="done"&&c.result)box.appendChild(el("div","note",c.result));
-  if(c.check)box.appendChild(el("div","line","Cara cek: "+c.check));
-  box.appendChild(el("div","line",c.id+" · "+ago(c.updated)+(c.rework?" · sudah diulang "+c.rework+"x":"")));
-  if(isOwner){
+  const box=el("div","card "+c.column+(isFolded(c)?" folded":""));
+  const head=el("button","head");
+  head.setAttribute("aria-expanded",String(!isFolded(c)));
+  head.appendChild(el("span","title",c.title));
+  head.appendChild(el("span","chev","▼"));
+  head.onclick=()=>toggle(c);
+  box.appendChild(head);
+  const body=el("div","body");
+  body.appendChild(el("div","line",sentence(c)));
+  if(c.column==="blocked"&&c.question)body.appendChild(el("div","note",c.question));
+  else if(c.column==="done"&&c.result)body.appendChild(el("div","note",c.result));
+  if(c.check)body.appendChild(el("div","line","Cara cek: "+c.check));
+  const t=el("div","line",c.id+" · dibuat "+clock(c.created)+" · diubah "+ago(c.updated)+(c.rework?" · diulang "+c.rework+"x":""));
+  t.title=new Date(c.updated*1000).toLocaleString("id-ID");
+  body.appendChild(t);
+  if(isOwner()){
     const a=el("div","actions");
     if(c.column==="backlog")a.appendChild(button("Jadikan tugas","primary",()=>move(c.id,"todo",{})));
     if(c.column==="blocked")a.appendChild(button("Jawab & ulangi","primary",async()=>{
       const reason=prompt("Tulis jawabanmu. Akan dikirim ke "+c.assignee+" untuk dikerjakan ulang:");
-      if(!reason||!reason.trim())return;
-      await move(c.id,"todo",{reason:reason.trim()});
+      if(reason&&reason.trim())await move(c.id,"todo",{reason:reason.trim()});
     }));
     a.appendChild(button("Hapus","danger",async()=>{
       if(!confirm("Hapus tugas ini beserta riwayatnya? Tidak bisa dibatalkan."))return;
-      await api("/cards/"+c.id,{method:"DELETE"});toast("Tugas dihapus");await load();
+      await api("/cards/"+c.id,{method:"DELETE"});toast("Tugas dihapus");load();
     }));
-    box.appendChild(a);
+    body.appendChild(a);
   }
+  box.appendChild(body);
   return box;
 }
 
-function render(cards){
-  const isOwner=ME.you===ME.owner;
-  $("who").textContent=(isOwner?"Owner":"Mode lihat saja")+" · "+ME.you;
+function describe(e){
+  const what=e.title?("«"+e.title+"»"):"tugas (sudah dihapus)";
+  if(e.frm==null)return e.actor+" membuat "+what;
+  if(e.to==="doing")return e.actor+" mulai mengerjakan "+what;
+  if(e.to==="done")return e.actor+" menyelesaikan "+what;
+  if(e.to==="blocked")return e.actor+" berhenti di "+what+": "+(e.note||"");
+  if(e.to==="todo"&&e.frm==="blocked")return e.actor+" mengulang "+what+(e.note?" — "+e.note:"");
+  if(e.to==="todo")return e.actor+" menjadikan "+what+" tugas";
+  if(e.to==="backlog")return e.actor+" menyimpan "+what+" sebagai ide";
+  return e.actor+" memindahkan "+what+" ke "+e.to;
+}
+
+let lastData=null;
+function render(data){
+  lastData=data; const [cards,acts]=data;
+  $("who").textContent=(isOwner()?"Owner":"Lihat saja")+" · "+ME.you;
+  $("new").hidden=!isOwner();
+  const owner=isOwner();
   $("guide").innerHTML="";
-  $("guide").appendChild(el("b",null,isOwner?"Kamu bisa mengatur tugas":"Kamu hanya bisa melihat"));
-  $("guide").appendChild(el("div",null,isOwner
-    ? "Tekan \"+ Tugas\" di kanan atas untuk membuat tugas baru. Di setiap kartu ada tombol untuk menjadikan tugas, menjawab pertanyaan, atau menghapus."
-    : "Setiap kartu menunjukkan siapa memberi tugas kepada siapa, dan sudah sampai mana."));
-  $("new").hidden=!isOwner;
+  $("guide").appendChild(el("b",null,owner?"Kamu bisa mengatur semua tugas":"Mode lihat saja"));
+  $("guide").appendChild(el("div",null,owner
+    ?"Kolom paling atas adalah yang perlu perhatian. Ketuk judul kartu untuk membuka atau melipat. Tombol \"+ Tugas\" di kanan atas untuk tugas baru."
+    :"Setiap kartu menunjukkan siapa memberi tugas kepada siapa, dan sudah sampai mana. Ketuk judul untuk membuka detail."));
+  const count=k=>cards.filter(c=>c.column===k).length;
+  const chips=$("chips"); chips.textContent="";
+  [["blocked","Terhambat","red"],["doing","Dikerjakan","amber"],["todo","Menunggu","" ],["backlog","Ide",""],["done","Selesai","green"]].forEach(([k,l,cl])=>{
+    const c=el("span","chip "+cl); c.appendChild(el("b",null,String(count(k)))); c.appendChild(document.createTextNode(l)); chips.appendChild(c);
+  });
+  const people={}; cards.filter(c=>c.column!=="done"&&c.column!=="backlog").forEach(c=>{
+    const p=people[c.assignee]||(people[c.assignee]={todo:0,doing:0,blocked:0});p[c.column]++});
+  const pe=$("people"); pe.textContent="";
+  const names=Object.keys(people);
+  if(names.length){pe.appendChild(document.createTextNode("Siapa sedang apa: "));
+    names.forEach((n,i)=>{const p=people[n];const parts=[];
+      if(p.doing)parts.push(p.doing+" dikerjakan");
+      if(p.todo)parts.push(p.todo+" menunggu");
+      if(p.blocked)parts.push(p.blocked+" terhambat");
+      pe.appendChild(el("b",null,n));
+      pe.appendChild(document.createTextNode(" "+parts.join(", ")+(i<names.length-1?"  ·  ":"")));});
+  } else pe.textContent="Tidak ada yang sedang mengerjakan tugas.";
   const board=$("board"); board.textContent="";
   for(const [key,label,desc] of COLS){
     const list=cards.filter(c=>c.column===key);
     if(key==="backlog"&&!list.length)continue;
-    const sec=el("section","col");
+    const col=el("section","col");
     const h=el("h2",null,label); h.appendChild(el("span",null,String(list.length)));
-    sec.appendChild(h); sec.appendChild(el("p","desc",desc));
-    if(!list.length)sec.appendChild(el("div","empty","Tidak ada tugas di sini."));
-    list.forEach(c=>sec.appendChild(cardEl(c)));
-    board.appendChild(sec);
+    col.appendChild(h); col.appendChild(el("p",null,desc));
+    if(!list.length)col.appendChild(el("div","empty","Kosong"));
+    list.forEach(c=>col.appendChild(cardEl(c)));
+    board.appendChild(col);
   }
-  if(!cards.length)board.appendChild(el("div","empty","Belum ada tugas sama sekali."));
+  const ul=$("acts"); ul.textContent="";
+  if(!acts.length)ul.appendChild(el("li",null,"Belum ada aktivitas."));
+  acts.forEach(e=>{const li=el("li",null,describe(e));li.appendChild(el("small",null,clock(e.ts)+" · "+ago(e.ts)));ul.appendChild(li)});
 }
 
 async function load(){
   if(!token){showLogin();return}
   try{
     if(!ME)ME=await api("/meta");
-    const cards=await api("/cards");
-    $("login").hidden=true; $("app").hidden=false; $("logout").hidden=false;
-    render(cards);
+    const [cards,acts]=await Promise.all([api("/cards"),api("/activity?limit=30")]);
+    $("login").hidden=true;$("app").hidden=false;$("logout").hidden=false;
+    const sig=JSON.stringify([cards,acts]);
+    if(sig!==lastSig){lastSig=sig;render([cards,acts])}
   }catch(e){
-    if(e.status===401){sessionStorage.removeItem(KEY);localStorage.removeItem(KEY);token=null;ME=null;toast("Token tidak dikenal. Masukkan lagi.");showLogin();return}
+    if(e.status===401){logout();toast("Token tidak dikenal. Masukkan lagi.");return}
     toast("Tidak bisa memuat: "+e.message);
   }
 }
 function showLogin(){$("login").hidden=false;$("app").hidden=true;$("logout").hidden=true;$("new").hidden=true;$("tok").focus()}
+function logout(){sessionStorage.removeItem(KEY);localStorage.removeItem(KEY);token=null;ME=null;lastSig="";showLogin()}
 
-function openForm(){
-  if(!ME||ME.you!==ME.owner)return;
+function setLive(on,txt){live=on;$("live").classList.toggle("on",on);$("livetxt").textContent=txt}
+async function stream(){
+  while(token){
+    try{
+      const r=await fetch("/stream",{headers:{Authorization:"Bearer "+token}});
+      if(r.status===401){logout();toast("Token tidak dikenal. Masukkan lagi.");return}
+      if(!r.ok)throw new Error("status "+r.status);
+      setLive(true,"langsung");
+      load();
+      const rd=r.body.getReader(), dec=new TextDecoder();
+      let buf="";
+      for(;;){
+        const {value,done}=await rd.read(); if(done)break;
+        buf+=dec.decode(value,{stream:true});
+        let i; while((i=buf.indexOf("\n\n"))>=0){const block=buf.slice(0,i);buf=buf.slice(i+2);if(block.includes("event: change"))load()}
+      }
+    }catch(e){}
+    setLive(false,"menyambung ulang…");
+    await new Promise(r=>setTimeout(r,3000));
+  }
+}
+
+$("new").onclick=()=>{
+  if(!isOwner())return;
   const sel=$("f-to"); sel.textContent="";
-  for(const w of ME.workers){const o=el("option",null,w);o.value=w;sel.appendChild(o)}
+  ME.workers.forEach(w=>{const o=el("option",null,w);o.value=w;sel.appendChild(o)});
   $("f-title").value="";$("f-body").value="";$("f-check").value="";$("f-backlog").checked=false;
   $("dlg").showModal();
-}
-$("new").onclick=openForm;
+};
 $("dlg").addEventListener("close",async()=>{
   if($("dlg").returnValue!=="ok")return;
   const title=$("f-title").value.trim();
@@ -695,19 +810,19 @@ $("dlg").addEventListener("close",async()=>{
     const body={title,assignee:$("f-to").value,body:$("f-body").value.trim(),check:$("f-check").value.trim()};
     if($("f-backlog").checked)body.column="backlog";
     await api("/cards",{method:"POST",body:JSON.stringify(body)});
-    toast("Tugas dibuat");await load();
+    toast("Tugas dibuat");load();
   }catch(e){toast(e.message)}
 });
-
 $("go").onclick=()=>{
   const v=$("tok").value.trim(); if(!v)return;
-  token=v; remember($("remember").checked); $("tok").value=""; ME=null; load();
+  sessionStorage.removeItem(KEY);localStorage.removeItem(KEY);
+  (($("remember").checked)?localStorage:sessionStorage).setItem(KEY,v);
+  token=v;ME=null;$("tok").value="";lastSig="";load();stream();
 };
 $("tok").addEventListener("keydown",e=>{if(e.key==="Enter")$("go").click()});
-$("logout").onclick=()=>{sessionStorage.removeItem(KEY);localStorage.removeItem(KEY);token=null;ME=null;showLogin()};
-
-token=tok(); load();
-setInterval(()=>{if(token&&ME)load()},15000);
+$("logout").onclick=logout;
+setInterval(()=>{if(token&&ME&&!live)load()},10000);
+token=tok(); if(token){load();stream()} else showLogin();
 </script>
 </body></html>
 """
@@ -760,8 +875,16 @@ def make_handler(board: Board):
                 actor = who(auth[7:].strip(), board.cfg) if auth.startswith("Bearer ") else None
                 if not actor:
                     return self._send(401, {"error": "unauthorized"})
+                if parts == ["stream"] and method == "GET":
+                    return self._stream()
                 qs = parse_qs(u.query)
                 one = lambda k: (qs.get(k) or [None])[0]
+                if parts == ["activity"] and method == "GET":
+                    try:
+                        limit = int(one("limit") or 25)
+                    except ValueError:
+                        raise KBError(400, "limit must be a number")
+                    return self._send(200, board.activity(max(1, min(limit, 100))))
                 if parts == ["cards"] and method == "GET":
                     try:
                         wait = int(one("wait") or 0)
@@ -793,6 +916,31 @@ def make_handler(board: Board):
             except Exception:
                 traceback.print_exc()
                 self._send(500, {"error": "internal error"})
+
+        def _stream(self) -> None:
+            """Server-Sent Events: one 'change' event per board write; pings keep the link alive."""
+            if not _LIVE.acquire(blocking=False):
+                return self._send(503, {"error": "too many live viewers, try again later"})
+            try:
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("X-Accel-Buffering", "no")
+                self.end_headers()
+                self.wfile.write(b"retry: 3000\n\n"); self.wfile.flush()
+                seen, end = _VER[0], time.time() + 1800
+                while time.time() < end:
+                    with _CHANGE:
+                        if _VER[0] == seen:
+                            _CHANGE.wait(15)
+                        moved = _VER[0] != seen
+                        seen = _VER[0]
+                    msg = b"event: change\ndata: %d\n\n" % seen if moved else b": ping\n\n"
+                    self.wfile.write(msg); self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            finally:
+                _LIVE.release()
 
         def do_GET(self): self._route("GET")
         def do_POST(self): self._route("POST")
