@@ -36,7 +36,7 @@ SECRETS = CONF_DIR / "secrets"
 
 COLS = ("backlog", "todo", "doing", "blocked", "done")
 ID_RE = re.compile(r"^[0-9a-f]{6}$")
-VERSION = "0.6.0"
+VERSION = "0.7.0"
 RELEASE_API = os.environ.get("UNIKAN_RELEASE_API", "https://api.github.com/repos/zalldz/unikan/releases/latest")
 RAW_BASE = os.environ.get("UNIKAN_RAW_BASE", "https://raw.githubusercontent.com/zalldz/unikan")
 MAX_UPDATE_BYTES = 512 * 1024
@@ -494,61 +494,222 @@ def who(token: str, cfg: dict) -> str | None:
     return found
 
 
-VIEW_HTML = """<!doctype html><html lang="id"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1"><title>unikan</title>
+VIEW_HTML = r"""<!doctype html>
+<html lang="id"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>unikan</title>
 <style>
-:root{color-scheme:light dark;--bg:#f6f7f9;--fg:#1b1f24;--card:#fff;--line:#d8dde3;--mute:#6b7785}
-@media (prefers-color-scheme:dark){:root{--bg:#15181c;--fg:#e6e9ed;--card:#1f242b;--line:#2e353e;--mute:#8b96a3}}
-body{margin:0;padding:12px;font:15px/1.4 system-ui,sans-serif;background:var(--bg);color:var(--fg)}
-h1{font-size:18px;margin:0 0 8px}.top{display:flex;gap:8px;align-items:center;justify-content:space-between;flex-wrap:wrap}
-.cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;margin-top:10px}
-.col h2{font-size:13px;text-transform:uppercase;color:var(--mute);margin:4px 0}
-.card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:8px;margin-bottom:8px}
-.route{font-weight:600}.meta{color:var(--mute);font-size:13px}.note{font-size:13px;margin-top:4px;white-space:pre-wrap}
-.blocked{border-color:#c0392b}.empty{color:var(--mute);font-size:13px}
-button,input{font:inherit;padding:6px 10px}
-</style></head><body>
-<div class="top"><h1>unikan — papan tim</h1><span class="meta" id="status"></span>
-<button id="forget" hidden>Ganti token</button></div>
-<div id="login" hidden>
-  <p class="meta">Masukkan token viewer (hanya baca). Disimpan di browser ini saja.</p>
-  <input id="tok" type="password" placeholder="token viewer" autocomplete="off">
-  <button id="go">Buka</button>
-</div>
-<div class="cols" id="board"></div>
+:root{color-scheme:light dark;--bg:#f4f6f8;--fg:#17202a;--card:#fff;--line:#d5dce3;--mute:#5f6b78;--accent:#1f6feb;--danger:#c0392b;--ok:#1e8449;--warn:#b9770e}
+@media (prefers-color-scheme:dark){:root{--bg:#121519;--fg:#e8ecf0;--card:#1d232b;--line:#2f3945;--mute:#9aa6b2;--accent:#58a6ff;--danger:#ff7b72;--ok:#56d364;--warn:#e3b341}}
+*{box-sizing:border-box}
+body{margin:0;font:16px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif;background:var(--bg);color:var(--fg);padding-bottom:24px}
+header{position:sticky;top:0;z-index:5;background:var(--bg);border-bottom:1px solid var(--line);padding:10px 14px;display:flex;justify-content:space-between;align-items:center;gap:8px}
+h1{font-size:19px;margin:0}
+.who{font-size:13px;color:var(--mute)}
+main{padding:12px 14px;max-width:900px;margin:0 auto}
+.help{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px;margin-bottom:12px;font-size:15px}
+.help b{display:block;margin-bottom:4px}
+section.col{margin-top:18px}
+section.col h2{font-size:17px;margin:0 0 4px;display:flex;justify-content:space-between}
+section.col p.desc{margin:0 0 8px;color:var(--mute);font-size:14px}
+.card{background:var(--card);border:1px solid var(--line);border-left:5px solid var(--accent);border-radius:12px;padding:12px;margin-bottom:10px}
+.card.blocked{border-left-color:var(--danger)}.card.done{border-left-color:var(--ok);opacity:.85}.card.doing{border-left-color:var(--warn)}
+.title{font-size:17px;font-weight:600;margin-bottom:4px;word-break:break-word}
+.line{font-size:14px;color:var(--mute);margin:2px 0}
+.note{margin:8px 0 0;padding:8px 10px;border-radius:8px;background:rgba(127,127,127,.12);font-size:15px;white-space:pre-wrap;word-break:break-word}
+.actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+button{font:inherit;min-height:44px;padding:8px 14px;border-radius:10px;border:1px solid var(--line);background:var(--card);color:var(--fg);cursor:pointer}
+button.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+button.danger{color:var(--danger)}
+button:disabled{opacity:.5}
+input,textarea,select{font:inherit;width:100%;min-height:44px;padding:8px 10px;border-radius:10px;border:1px solid var(--line);background:var(--card);color:var(--fg)}
+textarea{min-height:80px}
+label{display:block;font-size:14px;color:var(--mute);margin:10px 0 4px}
+.empty{color:var(--mute);font-size:14px;padding:6px 0}
+.hd{display:flex;gap:8px}
+dialog{width:min(480px,92vw);border:1px solid var(--line);border-radius:14px;background:var(--card);color:var(--fg);padding:16px}
+dialog::backdrop{background:rgba(0,0,0,.45)}
+.row{display:flex;gap:8px;justify-content:flex-end;margin-top:14px;flex-wrap:wrap}
+.toast{position:fixed;left:50%;transform:translateX(-50%);bottom:90px;background:#222;color:#fff;padding:10px 14px;border-radius:10px;font-size:15px;max-width:92vw;z-index:9}
+.check{display:flex;gap:8px;align-items:center;margin-top:10px;font-size:14px;color:var(--mute)}
+.check input{width:auto;min-height:0}
+</style></head>
+<body>
+<header>
+  <div><h1>unikan</h1><div class="who" id="who">papan tim</div></div>
+  <div class="hd"><button class="primary" id="new" hidden>+ Tugas</button><button id="logout" hidden>Keluar</button></div>
+</header>
+<main>
+  <div id="login" hidden>
+    <div class="help"><b>Masuk</b>Masukkan token yang diberikan kepadamu. Token hanya disimpan di perangkat ini.</div>
+    <label for="tok">Token</label>
+    <input id="tok" type="password" autocomplete="off" placeholder="tempel token di sini">
+    <div class="check"><input id="remember" type="checkbox"><label for="remember" style="margin:0">Ingat di perangkat ini</label></div>
+    <div class="row"><button class="primary" id="go">Masuk</button></div>
+  </div>
+  <div id="app" hidden>
+    <div class="help" id="guide"></div>
+    <div id="board"></div>
+  </div>
+</main>
+
+
+<dialog id="dlg">
+  <form method="dialog" id="form">
+    <h2 style="margin:0 0 6px;font-size:19px">Buat tugas baru</h2>
+    <label for="f-title">Judul tugas</label>
+    <input id="f-title" required maxlength="200" placeholder="contoh: Rangkum berita hari ini">
+    <label for="f-to">Untuk siapa?</label>
+    <select id="f-to"></select>
+    <label for="f-body">Penjelasan (opsional)</label>
+    <textarea id="f-body" maxlength="8000" placeholder="Apa yang harus dikerjakan, batasannya apa"></textarea>
+    <label for="f-check">Cara mengecek selesai (opsional)</label>
+    <input id="f-check" maxlength="1000" placeholder="contoh: hasil berisi 5 poin">
+    <div class="check"><input id="f-backlog" type="checkbox"><label for="f-backlog" style="margin:0">Simpan dulu sebagai ide, belum dikerjakan</label></div>
+    <div class="row">
+      <button value="cancel" formnovalidate>Batal</button>
+      <button class="primary" value="ok" id="f-save">Simpan</button>
+    </div>
+  </form>
+</dialog>
+<div class="toast" id="toast" hidden></div>
+
 <script>
-const COLS=[["backlog","Backlog"],["todo","Todo"],["doing","Sedang dikerjakan"],["blocked","Terhambat"],["done","Selesai"]];
+const KEY="unikan-token";
+const COLS=[
+  ["doing","Sedang dikerjakan","Ada yang sedang mengerjakan ini sekarang."],
+  ["todo","Menunggu dikerjakan","Sudah siap, tinggal menunggu giliran."],
+  ["blocked","Butuh perhatian","Macet. Biasanya ada pertanyaan yang perlu dijawab owner."],
+  ["backlog","Ide","Belum dijadwalkan. Owner bisa menjadikannya tugas."],
+  ["done","Selesai","Sudah beres. Hasilnya ada di kartu."]];
 const $=id=>document.getElementById(id);
-function el(tag,cls,text){const e=document.createElement(tag);if(cls)e.className=cls;if(text!=null)e.textContent=text;return e}
-function show(){$("login").hidden=true;$("forget").hidden=false}
-async function load(){
-  const t=localStorage.getItem("unikan-token");
-  if(!t){$("login").hidden=false;$("forget").hidden=true;return}
-  let r;
-  try{r=await fetch("/cards",{headers:{Authorization:"Bearer "+t}})}catch(e){$("status").textContent="server tidak terjangkau";return}
-  if(r.status===401){localStorage.removeItem("unikan-token");$("status").textContent="token salah";$("login").hidden=false;return}
-  const cards=await r.json();show();
-  const board=$("board");board.textContent="";
-  for(const [key,label] of COLS){
-    const col=el("div","col");col.appendChild(el("h2",null,label+" ("+cards.filter(c=>c.column===key).length+")"));
-    for(const c of cards.filter(c=>c.column===key)){
-      const box=el("div","card"+(key==="blocked"?" blocked":""));
-      box.appendChild(el("div","route",c.created_by+" → "+c.assignee));
-      box.appendChild(el("div",null,c.title));
-      box.appendChild(el("div","meta",c.id+" · "+new Date(c.updated*1000).toLocaleString("id-ID")));
-      const note=c.question||c.result;
-      if(note)box.appendChild(el("div","note",note));
-      col.appendChild(box);
-    }
-    if(!cards.some(c=>c.column===key))col.appendChild(el("div","empty","kosong"));
-    board.appendChild(col);
-  }
-  $("status").textContent="diperbarui "+new Date().toLocaleTimeString("id-ID");
+let ME=null, token=null;
+
+function tok(){return sessionStorage.getItem(KEY)||localStorage.getItem(KEY)}
+function remember(v){
+  sessionStorage.removeItem(KEY); localStorage.removeItem(KEY);
+  (v?localStorage:sessionStorage).setItem(KEY,token);
 }
-$("go").onclick=()=>{const v=$("tok").value.trim();if(v){localStorage.setItem("unikan-token",v);$("tok").value="";load()}};
-$("forget").onclick=()=>{localStorage.removeItem("unikan-token");load()};
-load();setInterval(()=>{if(localStorage.getItem("unikan-token"))load()},10000);
-</script></body></html>
+function el(tag,cls,text){const e=document.createElement(tag);if(cls)e.className=cls;if(text!=null)e.textContent=text;return e}
+let toastTimer;
+function toast(msg){const t=$("toast");t.textContent=msg;t.hidden=false;clearTimeout(toastTimer);toastTimer=setTimeout(()=>t.hidden=true,3500)}
+
+async function api(path,opts={}){
+  const r=await fetch(path,{...opts,headers:{Authorization:"Bearer "+token,"Content-Type":"application/json"}});
+  let data=null; try{data=await r.json()}catch(e){}
+  if(!r.ok){const err=new Error((data&&data.error)||("gagal ("+r.status+")"));err.status=r.status;throw err}
+  return data;
+}
+function ago(ts){
+  const d=Math.max(0,Date.now()/1000-ts);
+  if(d<60)return "baru saja"; if(d<3600)return Math.floor(d/60)+" menit lalu";
+  if(d<86400)return Math.floor(d/3600)+" jam lalu"; return Math.floor(d/86400)+" hari lalu";
+}
+function sentence(c){
+  if(c.column==="done")return c.created_by+" memberi tugas ke "+c.assignee+". Selesai.";
+  if(c.column==="doing")return c.assignee+" sedang mengerjakan tugas dari "+c.created_by+".";
+  if(c.column==="blocked")return c.assignee+" tidak bisa lanjut. Ada pertanyaan:";
+  if(c.column==="todo")return "Dari "+c.created_by+" untuk "+c.assignee+". Belum dimulai.";
+  return "Ide dari "+c.created_by+(c.assignee?" (untuk "+c.assignee+")":"")+".";
+}
+
+function button(label,cls,fn){const b=el("button",cls,label);b.onclick=async()=>{b.disabled=true;try{await fn()}catch(e){toast(e.message)}b.disabled=false};return b}
+async function move(id,to,body){await api("/cards/"+id+"/move",{method:"POST",body:JSON.stringify({to,...body})});toast("Berhasil");await load()}
+
+function cardEl(c){
+  const isOwner=ME.you===ME.owner;
+  const box=el("div","card "+c.column);
+  box.appendChild(el("div","title",c.title));
+  box.appendChild(el("div","line",sentence(c)));
+  if(c.column==="blocked"&&c.question)box.appendChild(el("div","note",c.question));
+  else if(c.column==="done"&&c.result)box.appendChild(el("div","note",c.result));
+  if(c.check)box.appendChild(el("div","line","Cara cek: "+c.check));
+  box.appendChild(el("div","line",c.id+" · "+ago(c.updated)+(c.rework?" · sudah diulang "+c.rework+"x":"")));
+  if(isOwner){
+    const a=el("div","actions");
+    if(c.column==="backlog")a.appendChild(button("Jadikan tugas","primary",()=>move(c.id,"todo",{})));
+    if(c.column==="blocked")a.appendChild(button("Jawab & ulangi","primary",async()=>{
+      const reason=prompt("Tulis jawabanmu. Akan dikirim ke "+c.assignee+" untuk dikerjakan ulang:");
+      if(!reason||!reason.trim())return;
+      await move(c.id,"todo",{reason:reason.trim()});
+    }));
+    a.appendChild(button("Hapus","danger",async()=>{
+      if(!confirm("Hapus tugas ini beserta riwayatnya? Tidak bisa dibatalkan."))return;
+      await api("/cards/"+c.id,{method:"DELETE"});toast("Tugas dihapus");await load();
+    }));
+    box.appendChild(a);
+  }
+  return box;
+}
+
+function render(cards){
+  const isOwner=ME.you===ME.owner;
+  $("who").textContent=(isOwner?"Owner":"Mode lihat saja")+" · "+ME.you;
+  $("guide").innerHTML="";
+  $("guide").appendChild(el("b",null,isOwner?"Kamu bisa mengatur tugas":"Kamu hanya bisa melihat"));
+  $("guide").appendChild(el("div",null,isOwner
+    ? "Tekan \"+ Tugas\" di kanan atas untuk membuat tugas baru. Di setiap kartu ada tombol untuk menjadikan tugas, menjawab pertanyaan, atau menghapus."
+    : "Setiap kartu menunjukkan siapa memberi tugas kepada siapa, dan sudah sampai mana."));
+  $("new").hidden=!isOwner;
+  const board=$("board"); board.textContent="";
+  for(const [key,label,desc] of COLS){
+    const list=cards.filter(c=>c.column===key);
+    if(key==="backlog"&&!list.length)continue;
+    const sec=el("section","col");
+    const h=el("h2",null,label); h.appendChild(el("span",null,String(list.length)));
+    sec.appendChild(h); sec.appendChild(el("p","desc",desc));
+    if(!list.length)sec.appendChild(el("div","empty","Tidak ada tugas di sini."));
+    list.forEach(c=>sec.appendChild(cardEl(c)));
+    board.appendChild(sec);
+  }
+  if(!cards.length)board.appendChild(el("div","empty","Belum ada tugas sama sekali."));
+}
+
+async function load(){
+  if(!token){showLogin();return}
+  try{
+    if(!ME)ME=await api("/meta");
+    const cards=await api("/cards");
+    $("login").hidden=true; $("app").hidden=false; $("logout").hidden=false;
+    render(cards);
+  }catch(e){
+    if(e.status===401){sessionStorage.removeItem(KEY);localStorage.removeItem(KEY);token=null;ME=null;toast("Token tidak dikenal. Masukkan lagi.");showLogin();return}
+    toast("Tidak bisa memuat: "+e.message);
+  }
+}
+function showLogin(){$("login").hidden=false;$("app").hidden=true;$("logout").hidden=true;$("new").hidden=true;$("tok").focus()}
+
+function openForm(){
+  if(!ME||ME.you!==ME.owner)return;
+  const sel=$("f-to"); sel.textContent="";
+  for(const w of ME.workers){const o=el("option",null,w);o.value=w;sel.appendChild(o)}
+  $("f-title").value="";$("f-body").value="";$("f-check").value="";$("f-backlog").checked=false;
+  $("dlg").showModal();
+}
+$("new").onclick=openForm;
+$("dlg").addEventListener("close",async()=>{
+  if($("dlg").returnValue!=="ok")return;
+  const title=$("f-title").value.trim();
+  if(!title){toast("Judul tugas wajib diisi");return}
+  try{
+    const body={title,assignee:$("f-to").value,body:$("f-body").value.trim(),check:$("f-check").value.trim()};
+    if($("f-backlog").checked)body.column="backlog";
+    await api("/cards",{method:"POST",body:JSON.stringify(body)});
+    toast("Tugas dibuat");await load();
+  }catch(e){toast(e.message)}
+});
+
+$("go").onclick=()=>{
+  const v=$("tok").value.trim(); if(!v)return;
+  token=v; remember($("remember").checked); $("tok").value=""; ME=null; load();
+};
+$("tok").addEventListener("keydown",e=>{if(e.key==="Enter")$("go").click()});
+$("logout").onclick=()=>{sessionStorage.removeItem(KEY);localStorage.removeItem(KEY);token=null;ME=null;showLogin()};
+
+token=tok(); load();
+setInterval(()=>{if(token&&ME)load()},15000);
+</script>
+</body></html>
 """
 
 
@@ -609,6 +770,8 @@ def make_handler(board: Board):
                     return self._send(200, board.wait_list(one("column"), one("assignee"), wait))
                 if parts == ["cards"] and method == "POST":
                     return self._send(201, board.create(actor, self._body()))
+                if parts == ["meta"] and method == "GET":
+                    return self._send(200, {"you": actor, "owner": board.owner, "workers": board.workers})
                 if parts == ["stats"] and method == "GET":
                     return self._send(200, board.stats())
                 if len(parts) >= 2 and parts[0] == "cards":

@@ -532,5 +532,19 @@ class View(unittest.TestCase):
         self.assertEqual(self.e.req("lead", "POST", "/cards", {"title": "x", "assignee": "viewer"})[0], 400)
 
 
+class Meta(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls): cls.e = Env()
+    @classmethod
+    def tearDownClass(cls): cls.e.close()
+
+    def test_meta_tells_page_who_is_logged_in(self):
+        for who, exp in (("owner", "owner"), ("viewer", "viewer"), ("alice", "alice")):
+            s, m = self.e.req(who, "GET", "/meta")
+            self.assertEqual((s, m["you"], m["owner"]), (200, exp, "owner"))
+        self.assertEqual(self.e.req("owner", "GET", "/meta")[1]["workers"], ["alice", "bob", "carol"])
+        self.assertEqual(self.e.req(None, "GET", "/meta", token="nope")[0], 401)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
