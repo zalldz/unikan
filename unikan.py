@@ -36,6 +36,9 @@ SECRETS = CONF_DIR / "secrets"
 
 COLS = ("backlog", "todo", "doing", "blocked", "done")
 ID_RE = re.compile(r"^[0-9a-f]{6}$")
+VERSION = "0.3.0"
+UPDATE_URL = os.environ.get("UNIKAN_UPDATE_URL", "https://raw.githubusercontent.com/zalldz/unikan/master/unikan.py")
+MAX_UPDATE_BYTES = 512 * 1024
 MAX_BODY = 65536
 MAX_REWORK = 2
 
@@ -702,12 +705,47 @@ def demo_cmd(args) -> None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def update_cmd(args) -> None:
+    """Replace this file with the latest release from GitHub. Keeps the old one as .prev."""
+    me = Path(__file__).resolve()
+    try:
+        with urllib.request.urlopen(UPDATE_URL, timeout=20) as r:
+            src = r.read(MAX_UPDATE_BYTES + 1)
+    except (urllib.error.URLError, OSError) as e:
+        sys.exit(f"unikan: cannot reach update source ({e})")
+    if len(src) > MAX_UPDATE_BYTES:
+        sys.exit("unikan: update file too large, refused")
+    text = src.decode("utf-8", "replace")
+    m = re.search(r'^VERSION = "([^"]+)"', text, re.M)
+    if not m:
+        sys.exit("unikan: update file has no VERSION, refused")
+    new = m.group(1)
+    if new == VERSION:
+        return print(f"unikan {VERSION}: already up to date")
+    if args.check:
+        return print(f"unikan {VERSION}: update available -> {new} (run: unikan update)")
+    try:
+        compile(text, "unikan.py", "exec")
+    except SyntaxError as e:
+        sys.exit(f"unikan: update does not compile ({e}); keeping {VERSION}")
+    tmp = me.with_name(me.name + ".new")
+    tmp.write_text(text, encoding="utf-8")
+    os.chmod(tmp, 0o755)
+    os.replace(me, me.with_name(me.name + ".prev"))
+    os.replace(tmp, me)
+    print(f"unikan {VERSION} -> {new} updated. Old copy: {me.name}.prev")
+    print("If this machine runs `unikan serve`, restart that service to load the new version.")
+
+
 def main() -> None:
     p = argparse.ArgumentParser(prog="unikan", description="standalone kanban board")
     p.add_argument("--as", dest="who", help="identity (or UNIKAN_AS)")
     p.add_argument("--url", help="server URL (or UNIKAN_URL)")
     sp = p.add_subparsers(dest="cmd", required=True)
     sp.add_parser("serve")
+    up = sp.add_parser("update", help="fetch the latest unikan.py from GitHub")
+    up.add_argument("--check", action="store_true", help="only check, do not replace")
+    sp.add_parser("version")
     sp.add_parser("demo", help="try it out: runs a throwaway board, touches nothing of yours")
     ini = sp.add_parser("init", help="first-time setup: config + tokens")
     ini.add_argument("--owner", default="owner", help="your name (the human who creates cards)")
@@ -733,6 +771,10 @@ def main() -> None:
     s = sp.add_parser("shelve"); s.add_argument("id")  # blocked->backlog / todo->backlog
     args = p.parse_args()
 
+    if args.cmd == "version":
+        return print(VERSION)
+    if args.cmd == "update":
+        return update_cmd(args)
     if args.cmd == "init":
         return init_cmd(args)
     if args.cmd == "demo":

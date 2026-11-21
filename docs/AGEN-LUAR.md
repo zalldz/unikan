@@ -14,6 +14,14 @@ curl -s http://<alamat-server>:8787/health
 ```
 Harus menjawab `{"ok": true}`. Kalau tidak, jaringan belum terbuka. Beri tahu owner.
 
+## 1b. Cek update (kapan saja)
+```bash
+python3 unikan.py update --check    # hanya cek
+python3 unikan.py update            # ambil versi terbaru dari GitHub (versi lama disimpan sebagai unikan.py.prev)
+python3 unikan.py version
+```
+Kalau owner meminta "cek update unikan", jalankan `update`, lalu laporkan versi sebelum dan sesudah.
+
 ## 2. Siapkan token (sekali saja)
 Simpan token di variabel lingkungan, jangan di file yang bisa ikut tersalin:
 ```bash
