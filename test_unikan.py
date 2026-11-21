@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Tests for kb: spins a real server on a temp dir + random port. Run: python3 test_kb.py"""
+"""Tests for unikan: spins a real server on a temp dir + random port. Run: python3 test_unikan.py"""
 import json, os, socket, subprocess, sys, tempfile, threading, time, unittest, urllib.request, urllib.error
 from pathlib import Path
 
-KB = str(Path(__file__).with_name("kb.py"))
+UNIKAN = str(Path(__file__).with_name("unikan.py"))
 
 
 def free_port():
@@ -23,15 +23,15 @@ class Env:
                "retry_delay": 1, "reap_interval": 1, "min_ttl": 1, "max_wakes": 3, "wake_timeout": 20}
         cfg.update(extra)
         (self.conf / "config.json").write_text(json.dumps(cfg))
-        self.env = dict(os.environ, KB_CONF=str(self.conf), KB_DATA=str(self.data))
-        self.env.pop("KB_TOKEN", None); self.env.pop("KB_AS", None)
+        self.env = dict(os.environ, UNIKAN_CONF=str(self.conf), UNIKAN_DATA=str(self.data))
+        self.env.pop("UNIKAN_TOKEN", None); self.env.pop("UNIKAN_AS", None)
         for n in ("lead", "alice", "bob", "carol", "owner"):  # token names must match config
-            subprocess.run([sys.executable, KB, "token", "new", n], env=self.env, check=True, capture_output=True)
+            subprocess.run([sys.executable, UNIKAN, "token", "new", n], env=self.env, check=True, capture_output=True)
         self.proc = None
         self.start()
 
     def start(self):
-        self.proc = subprocess.Popen([sys.executable, KB, "serve"], env=self.env,
+        self.proc = subprocess.Popen([sys.executable, UNIKAN, "serve"], env=self.env,
                                      stdout=subprocess.DEVNULL, stderr=open(self.conf / "server.log", "ab"))
         for _ in range(100):
             try:
@@ -62,7 +62,7 @@ class Env:
             return e.code, json.load(e)
 
     def cli(self, who, *args):
-        return subprocess.run([sys.executable, KB, "--as", who, *args], env=self.env, capture_output=True, text=True)
+        return subprocess.run([sys.executable, UNIKAN, "--as", who, *args], env=self.env, capture_output=True, text=True)
 
     def add(self, to="bob", **kw):
         s, c = self.req("lead", "POST", "/cards", {"title": "t", "assignee": to, **kw})
@@ -202,7 +202,7 @@ class Persistence(unittest.TestCase):
             e.stop(); e.start()
             s, c = e.req("bob", "GET", f"/cards/{cid}")
             self.assertEqual((s, c["column"]), (200, "doing"))
-            out = subprocess.run([sys.executable, KB, "backup"], env=e.env, capture_output=True, text=True)
+            out = subprocess.run([sys.executable, UNIKAN, "backup"], env=e.env, capture_output=True, text=True)
             self.assertEqual(out.returncode, 0, out.stderr); self.assertTrue(Path(out.stdout.strip()).exists())
         finally:
             e.close()
@@ -271,34 +271,34 @@ class Wake(unittest.TestCase):
 
 
 class EnvWithWake(Env):
-    """Env whose wake command claims via the CLI (needs KB_CONF/KB_DATA/KB_URL in the child env)."""
+    """Env whose wake command claims via the CLI (needs UNIKAN_CONF/UNIKAN_DATA/UNIKAN_URL in the child env)."""
     def __init__(self, log):
-        cmd = ["sh", "-c", f"echo {{id}} >> {log}; {sys.executable} {KB} --as bob claim {{id}}"]
+        cmd = ["sh", "-c", f"echo {{id}} >> {log}; {sys.executable} {UNIKAN} --as bob claim {{id}}"]
         super().__init__(notify={"bob": cmd})
 
 
 class FreshInstall(unittest.TestCase):
-    """What a newcomer does: kb init, kb serve, then use the board with the names they chose."""
+    """What a newcomer does: unikan init, unikan serve, then use the board with the names they chose."""
     def test_init_then_use(self):
         tmp = tempfile.TemporaryDirectory(); t = Path(tmp.name)
         port = free_port()
-        env = dict(os.environ, KB_CONF=str(t / "conf"), KB_DATA=str(t / "data"))
-        env.pop("KB_TOKEN", None); env.pop("KB_AS", None)
-        r = subprocess.run([sys.executable, KB, "init", "--owner", "ani", "--agents", "rina,dodi", "--port", str(port)],
+        env = dict(os.environ, UNIKAN_CONF=str(t / "conf"), UNIKAN_DATA=str(t / "data"))
+        env.pop("UNIKAN_TOKEN", None); env.pop("UNIKAN_AS", None)
+        r = subprocess.run([sys.executable, UNIKAN, "init", "--owner", "ani", "--agents", "rina,dodi", "--port", str(port)],
                            env=env, capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
-        r = subprocess.run([sys.executable, KB, "init", "--owner", "ani"], env=env, capture_output=True, text=True)
+        r = subprocess.run([sys.executable, UNIKAN, "init", "--owner", "ani"], env=env, capture_output=True, text=True)
         self.assertNotEqual(r.returncode, 0)  # refuses to overwrite without --force
-        self.assertFalse(subprocess.run([sys.executable, KB, "init", "--owner", "a b"], env=dict(env, KB_CONF=str(t / "c2")),
+        self.assertFalse(subprocess.run([sys.executable, UNIKAN, "init", "--owner", "a b"], env=dict(env, UNIKAN_CONF=str(t / "c2")),
                                         capture_output=True).returncode == 0)
-        srv = subprocess.Popen([sys.executable, KB, "serve"], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        srv = subprocess.Popen([sys.executable, UNIKAN, "serve"], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
             url = f"http://127.0.0.1:{port}"
             for _ in range(100):
                 try: urllib.request.urlopen(url + "/health", timeout=1); break
                 except Exception: time.sleep(0.1)
             def cli(who, *a):
-                return subprocess.run([sys.executable, KB, "--as", who, "--url", url, *a], env=env, capture_output=True, text=True)
+                return subprocess.run([sys.executable, UNIKAN, "--as", who, "--url", url, *a], env=env, capture_output=True, text=True)
             r = cli("ani", "add", "first card", "--to", "rina", "--body", "hello")
             self.assertEqual(r.returncode, 0, r.stderr)
             cid = r.stdout.split()[0]
@@ -310,6 +310,17 @@ class FreshInstall(unittest.TestCase):
             self.assertNotEqual(cli("rina", "add", "x", "--to", "dodi").returncode, 0)  # workers cannot create
         finally:
             srv.terminate(); srv.wait(10); tmp.cleanup()
+
+
+class Demo(unittest.TestCase):
+    def test_demo_runs_and_leaves_no_temp_dir(self):
+        import glob, tempfile
+        before = set(glob.glob(os.path.join(tempfile.gettempdir(), "unikan-demo-*")))
+        r = subprocess.run([sys.executable, UNIKAN, "demo"], capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("403 only the assignee may claim", r.stdout)
+        self.assertIn("done", r.stdout)
+        self.assertEqual(set(glob.glob(os.path.join(tempfile.gettempdir(), "unikan-demo-*"))), before)
 
 
 if __name__ == "__main__":

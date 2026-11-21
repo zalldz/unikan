@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""kb — standalone kanban board for the agent office. SQLite + HTTP + CLI, stdlib only, no LLM.
+"""unikan — standalone kanban board for the agent office. SQLite + HTTP + CLI, stdlib only, no LLM.
 
-Server (`kb serve`) enforces the rules; identity comes from the bearer token, never from the body.
+Server (`unikan serve`) enforces the rules; identity comes from the bearer token, never from the body.
 Columns: backlog -> todo -> doing -> done | blocked.  See README.md.
 """
 from __future__ import annotations
@@ -10,6 +10,7 @@ import argparse
 import hashlib
 import hmac
 import json
+import socket
 import os
 import queue
 import re
@@ -27,9 +28,9 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 HOME = Path.home()
-CONF_DIR = Path(os.environ.get("KB_CONF", HOME / ".config/kb"))
-DATA_DIR = Path(os.environ.get("KB_DATA", HOME / ".local/share/kb"))
-DB_PATH = DATA_DIR / "kb.db"
+CONF_DIR = Path(os.environ.get("UNIKAN_CONF", HOME / ".config/unikan"))
+DATA_DIR = Path(os.environ.get("UNIKAN_DATA", HOME / ".local/share/unikan"))
+DB_PATH = DATA_DIR / "unikan.db"
 TOKENS = CONF_DIR / "tokens.json"
 SECRETS = CONF_DIR / "secrets"
 
@@ -70,8 +71,8 @@ def load_cfg() -> dict:
     except FileNotFoundError:
         pass
     for k in ("ttl", "min_ttl", "max_wakes", "retry_delay", "wake_timeout", "reap_interval"):
-        if os.environ.get("KB_" + k.upper()):
-            cfg[k] = int(os.environ["KB_" + k.upper()])
+        if os.environ.get("UNIKAN_" + k.upper()):
+            cfg[k] = int(os.environ["UNIKAN_" + k.upper()])
     return cfg
 
 
@@ -337,13 +338,13 @@ class Board:
 def backup(keep: int = 7) -> Path:
     d = DATA_DIR / "backups"
     d.mkdir(parents=True, exist_ok=True)
-    out = d / f"kb-{time.strftime('%Y%m%d-%H%M%S')}.db"
+    out = d / f"unikan-{time.strftime('%Y%m%d-%H%M%S')}.db"
     src, dst = db(), sqlite3.connect(out)
     try:
         src.backup(dst)
     finally:
         dst.close(); src.close()
-    for old in sorted(d.glob("kb-*.db"))[:-keep]:
+    for old in sorted(d.glob("unikan-*.db"))[:-keep]:
         old.unlink()
     return out
 
@@ -394,7 +395,7 @@ class Router:
         finally:
             c.close()
         argv = [a.replace("{id}", cid) for a in self.cfg["notify"][agent]]
-        env = dict(os.environ, KB_AS=agent, KB_CARD=cid)
+        env = dict(os.environ, UNIKAN_AS=agent, UNIKAN_CARD=cid)
         lock = self.heavy if agent in self.cfg["serialize"] else None
         if lock:
             lock.acquire()
@@ -440,7 +441,7 @@ def who(token: str, cfg: dict) -> str | None:
 
 def make_handler(board: Board):
     class H(BaseHTTPRequestHandler):
-        server_version = "kb"
+        server_version = "unikan"
 
         def log_message(self, fmt, *a):
             sys.stderr.write("%s %s\n" % (self.address_string(), fmt % a))
@@ -524,7 +525,7 @@ def serve() -> None:
             try:
                 s = ThreadingHTTPServer((host, port), handler)
                 s.daemon_threads = True
-                print(f"kb listening on {host}:{port}", file=sys.stderr, flush=True)
+                print(f"unikan listening on {host}:{port}", file=sys.stderr, flush=True)
                 s.serve_forever()
             except OSError as e:
                 print(f"bind {host}:{port} failed ({e}); retry in 10s", file=sys.stderr, flush=True)
@@ -545,25 +546,25 @@ def serve() -> None:
 
     threading.Thread(target=reaper, daemon=True).start()
     router.start_sweep()
-    print(f"kb listening on {cfg['bind'][0]}:{port}", file=sys.stderr, flush=True)
+    print(f"unikan listening on {cfg['bind'][0]}:{port}", file=sys.stderr, flush=True)
     first.serve_forever()
 
 
 # ---------------------------------------------------------------- client CLI
 def _token(name: str) -> str:
-    if os.environ.get("KB_TOKEN"):
-        return os.environ["KB_TOKEN"]
+    if os.environ.get("UNIKAN_TOKEN"):
+        return os.environ["UNIKAN_TOKEN"]
     try:
         return (SECRETS / f"{name}.token").read_text().strip()
     except OSError:
-        sys.exit(f"kb: no token for '{name}' (set KB_TOKEN or create {SECRETS}/{name}.token)")
+        sys.exit(f"unikan: no token for '{name}' (set UNIKAN_TOKEN or create {SECRETS}/{name}.token)")
 
 
 def call(args, method: str, path: str, body: dict | None = None):
-    name = args.who or os.environ.get("KB_AS")
+    name = args.who or os.environ.get("UNIKAN_AS")
     if not name:
-        sys.exit("kb: say who you are: --as NAME or KB_AS=NAME")
-    url = (args.url or os.environ.get("KB_URL") or load_cfg()["url"]).rstrip("/") + path
+        sys.exit("unikan: say who you are: --as NAME or UNIKAN_AS=NAME")
+    url = (args.url or os.environ.get("UNIKAN_URL") or load_cfg()["url"]).rstrip("/") + path
     req = urllib.request.Request(url, method=method,
                                  data=json.dumps(body).encode() if body is not None else None,
                                  headers={"Authorization": "Bearer " + _token(name),
@@ -576,9 +577,9 @@ def call(args, method: str, path: str, body: dict | None = None):
             msg = json.load(e).get("error", "")
         except Exception:
             msg = ""
-        sys.exit(f"kb: {e.code} {msg}")
+        sys.exit(f"unikan: {e.code} {msg}")
     except urllib.error.URLError as e:
-        sys.exit(f"kb: server unreachable ({e.reason})")
+        sys.exit(f"unikan: server unreachable ({e.reason})")
 
 
 def line(c: dict) -> str:
@@ -587,7 +588,7 @@ def line(c: dict) -> str:
 
 def create_token(name: str, cfg: dict) -> Path:
     if name not in roles(cfg)[2]:
-        sys.exit("kb: unknown name " + name + "; add it to config.json first")
+        sys.exit("unikan: unknown name " + name + "; add it to config.json first")
     CONF_DIR.mkdir(parents=True, exist_ok=True)
     try:
         table = json.loads(TOKENS.read_text())
@@ -622,29 +623,79 @@ def token_admin(args) -> None:
 def init_cmd(args) -> None:
     cfile = CONF_DIR / "config.json"
     if cfile.exists() and not args.force:
-        sys.exit(f"kb: already set up ({cfile}). Use --force to rewrite the config and rotate all tokens.")
+        sys.exit(f"unikan: already set up ({cfile}). Use --force to rewrite the config and rotate all tokens.")
     split = lambda v: [x.strip() for x in v.split(",") if x.strip()]
     cfg = dict(DEFAULT_CFG)
     cfg.update(owner=args.owner, agents=split(args.agents), bosses=split(args.bosses),
                port=args.port, url=f"http://127.0.0.1:{args.port}")
     if not args.owner or " " in args.owner:
-        sys.exit("kb: --owner must be one word")
+        sys.exit("unikan: --owner must be one word")
     CONF_DIR.mkdir(parents=True, exist_ok=True)
     cfile.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n")
     for name in roles(cfg)[2]:
         create_token(name, cfg)
-    print(f"kb set up in {CONF_DIR}")
+    print(f"unikan set up in {CONF_DIR}")
     print(f"owner: {args.owner}  bosses: {','.join(cfg['bosses']) or '-'}  workers: {','.join(cfg['agents'])}")
     print(f"tokens: {SECRETS}/<name>.token (never share them)")
-    print("next: kb serve   (or install the systemd service, see README)")
+    print("next: unikan serve   (or install the systemd service, see README)")
+
+
+def free_port() -> int:
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+def demo_cmd(args) -> None:
+    """Throwaway board in a temp dir, real server, nothing of yours is touched."""
+    import shutil, tempfile
+    tmp = Path(tempfile.mkdtemp(prefix="unikan-demo-"))
+    port = free_port()
+    env = dict(os.environ, UNIKAN_CONF=str(tmp / "conf"), UNIKAN_DATA=str(tmp / "data"))
+    env.pop("UNIKAN_TOKEN", None); env.pop("UNIKAN_AS", None)
+    base = [sys.executable, str(Path(__file__).resolve())]
+    me = base + ["--url", f"http://127.0.0.1:{port}"]
+
+    def run(who, *a):
+        r = subprocess.run(me + ["--as", who, *a], env=env, capture_output=True, text=True)
+        print(f"$ unikan --as {who} {' '.join(a)}")
+        print("  " + ((r.stdout or r.stderr).strip() or "(ok)").replace("\n", "\n  "))
+        return r
+
+    try:
+        subprocess.run(base + ["init", "--owner", "kamu", "--agents", "rina,dodi", "--port", str(port)],
+                       env=env, check=True, capture_output=True)
+        srv = subprocess.Popen(base + ["serve"], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            for _ in range(100):
+                try:
+                    urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=1)
+                    break
+                except Exception:
+                    time.sleep(0.1)
+            r = run("kamu", "add", "Tulis ringkasan minggu ini", "--to", "rina", "--body", "maksimal 5 poin")
+            cid = r.stdout.split()[0]
+            run("rina", "next")
+            run("dodi", "claim", cid)
+            print("  ^ dodi ditolak: kartu itu milik rina. Aturan dijaga server, bukan kesepakatan.")
+            run("rina", "claim", cid)
+            run("rina", "done", cid, "--result", "ringkasan sudah ditulis")
+            run("kamu", "ls", "--all")
+        finally:
+            srv.terminate(); srv.wait(10)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(prog="kb", description="standalone kanban board")
-    p.add_argument("--as", dest="who", help="identity (or KB_AS)")
-    p.add_argument("--url", help="server URL (or KB_URL)")
+    p = argparse.ArgumentParser(prog="unikan", description="standalone kanban board")
+    p.add_argument("--as", dest="who", help="identity (or UNIKAN_AS)")
+    p.add_argument("--url", help="server URL (or UNIKAN_URL)")
     sp = p.add_subparsers(dest="cmd", required=True)
     sp.add_parser("serve")
+    sp.add_parser("demo", help="try it out: runs a throwaway board, touches nothing of yours")
     ini = sp.add_parser("init", help="first-time setup: config + tokens")
     ini.add_argument("--owner", default="owner", help="your name (the human who creates cards)")
     ini.add_argument("--agents", default="worker-a,worker-b", help="comma-separated worker names")
@@ -671,6 +722,8 @@ def main() -> None:
 
     if args.cmd == "init":
         return init_cmd(args)
+    if args.cmd == "demo":
+        return demo_cmd(args)
     if args.cmd == "serve":
         return serve()
     if args.cmd == "backup":
@@ -695,7 +748,7 @@ def main() -> None:
                 print(line(c))
         return
     if args.cmd == "next":
-        me = args.who or os.environ.get("KB_AS")
+        me = args.who or os.environ.get("UNIKAN_AS")
         for c in call(args, "GET", f"/cards?column=todo&assignee={me}"):
             print(line(c))
         return
