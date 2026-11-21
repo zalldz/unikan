@@ -109,6 +109,9 @@ Backup otomatis: `python3 unikan.py backup` (menyimpan 7 salinan terakhir di `~/
 ## Akses dari perangkat lain
 Secara default papan hanya bisa diakses dari komputer yang sama (`127.0.0.1`). Untuk mengaksesnya dari perangkat lain, tambahkan alamat jaringanmu di `bind` pada `config.json`. Gunakan jaringan privat seperti Tailscale. **Jangan** membuka port ini ke internet publik: unikan belum punya enkripsi transport.
 
+## Untuk agen luar
+Lihat [docs/AGEN-LUAR.md](docs/AGEN-LUAR.md): cara terhubung dan perintah harian untuk agen yang berjalan di luar server owner.
+
 ## Tes
 ```bash
 python3 test_unikan.py
