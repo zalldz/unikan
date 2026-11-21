@@ -585,5 +585,46 @@ class Live(unittest.TestCase):
         self.assertEqual(cm.exception.code, 401)
 
 
+class Stall(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls): cls.e = Env()
+    @classmethod
+    def tearDownClass(cls): cls.e.close()
+
+    def wait_stalled(self, cid):
+        for _ in range(60):
+            time.sleep(0.25)
+            c = self.e.req("owner", "GET", f"/cards/{cid}")[1]
+            if c["column"] == "blocked": return c
+        self.fail("card never stalled")
+
+    def test_stalled_card_is_flagged_and_worker_can_finish_late(self):
+        e = self.e
+        cid = e.add("alice", ttl=1)
+        e.mv("alice", cid, "doing")
+        c = self.wait_stalled(cid)
+        self.assertTrue(c["stalled"]); self.assertIn("timeout", c["question"])
+        self.assertEqual(e.mv("bob", cid, "done", result="x")[0], 403)     # not the worker
+        self.assertEqual(e.mv("alice", cid, "done")[0], 400)                 # result still required
+        s, c = e.mv("alice", cid, "done", result="hasil terlambat")
+        self.assertEqual((s, c["column"], c["result"], c["stalled"]), (200, "done", "hasil terlambat", False))
+
+    def test_stalled_card_can_be_resumed(self):
+        e = self.e
+        cid = e.add("alice", ttl=1)
+        e.mv("alice", cid, "doing")
+        self.wait_stalled(cid)
+        s, c = e.mv("alice", cid, "doing")
+        self.assertEqual((s, c["column"], c["stalled"]), (200, "doing", False))
+
+    def test_worker_own_block_is_not_stall_and_cannot_be_finished(self):
+        e = self.e
+        cid = e.add("alice")
+        e.mv("alice", cid, "doing")
+        e.mv("alice", cid, "blocked", question="butuh API key")
+        self.assertFalse(e.req("alice", "GET", f"/cards/{cid}")[1]["stalled"])
+        self.assertEqual(e.mv("alice", cid, "done", result="x")[0], 409)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

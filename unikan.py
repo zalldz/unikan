@@ -36,12 +36,13 @@ SECRETS = CONF_DIR / "secrets"
 
 COLS = ("backlog", "todo", "doing", "blocked", "done")
 ID_RE = re.compile(r"^[0-9a-f]{6}$")
-VERSION = "0.8.0"
+VERSION = "0.9.0"
 RELEASE_API = os.environ.get("UNIKAN_RELEASE_API", "https://api.github.com/repos/zalldz/unikan/releases/latest")
 RAW_BASE = os.environ.get("UNIKAN_RAW_BASE", "https://raw.githubusercontent.com/zalldz/unikan")
 MAX_UPDATE_BYTES = 512 * 1024
 MAX_BODY = 65536
 MAX_REWORK = 2
+STALL = "timeout:"  # question prefix the reaper writes; marks a card as stalled (not a worker's own question)
 
 EVENT_TEXT = {
     "done": "Selesai {id} oleh {actor}: {result}",
@@ -67,6 +68,10 @@ DEFAULT_CFG = {
     "serialize": [],
     "on_event": [],                 # e.g. ["python3", "/path/send.py", "{text}"]; empty = off                # agents whose wake commands never overlap (RAM)
 }
+
+
+def mins_text(sec: int) -> str:
+    return f"{sec} detik" if sec < 60 else f"{sec // 60} menit"
 
 
 def roles(cfg: dict) -> tuple[list, list, list]:
@@ -130,7 +135,8 @@ def card_json(r: sqlite3.Row) -> dict:
     return {"id": r["id"], "title": r["title"], "body": r["body"], "assignee": r["assignee"],
             "created_by": r["created_by"], "column": r["col"], "check": r["chk"],
             "result": r["result"], "question": r["question"], "rework": r["rework"],
-            "ttl": r["ttl"], "wakes": r["wakes"], "created": r["created"], "updated": r["updated"]}
+            "ttl": r["ttl"], "wakes": r["wakes"], "created": r["created"], "updated": r["updated"],
+            "stalled": r["col"] == "blocked" and r["question"].startswith(STALL)}
 
 
 def _text(d: dict, key: str, limit: int, required: bool = False) -> str:
@@ -285,6 +291,16 @@ class Board:
                     if r["rework"] >= MAX_REWORK and actor != self.owner:
                         raise KBError(409, f"rework limit ({MAX_REWORK}) reached; ask the owner")
                     upd.update(rework=r["rework"] + 1, wakes=0, question="")
+                elif key in (("blocked", "doing"), ("blocked", "done")) and r["question"].startswith(STALL):
+                    # a stalled card can be resumed or finished by its worker (work may have finished late)
+                    if not (me or priv):
+                        raise KBError(403, "only the assignee may resume a stalled card")
+                    if to == "done" and not result:
+                        raise KBError(400, "result is required")
+                    upd["question"] = ""
+                    if to == "done":
+                        upd["result"] = result
+                    note = "resumed" if to == "doing" else "done (after stall)"
                 elif key == ("todo", "doing"):
                     if not (me or priv):
                         raise KBError(403, "only the assignee may claim")
@@ -393,7 +409,7 @@ class Board:
         for r in rows:
             try:
                 self.move("system", r["id"], "blocked",
-                          {"question": f"timeout: no progress for {r['ttl'] // 60} min"})
+                          {"question": f"{STALL} tidak ada kabar selama {mins_text(r['ttl'])}"})
                 n += 1
             except KBError:
                 pass
@@ -585,6 +601,22 @@ dialog::backdrop{background:rgba(0,0,0,.45)}
 .toast{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(16px + env(safe-area-inset-bottom));background:#1f2937;color:#fff;padding:10px 16px;border-radius:10px;font-size:15px;max-width:92vw;z-index:9;box-shadow:0 4px 16px rgba(0,0,0,.25)}
 .tools{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
 @media (prefers-reduced-motion:reduce){*{transition:none!important}}
+
+.stat{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:14px;color:var(--mute);margin:-4px 0 12px}
+.stat b{color:var(--fg)}
+.alert{background:rgba(194,65,12,.1);border:1px solid var(--red);color:var(--fg);border-radius:12px;padding:10px 12px;margin-bottom:12px;font-size:15px}
+.alert b{color:var(--red)}
+.pill{display:inline-block;font-size:12px;font-weight:600;padding:2px 8px;border-radius:999px;background:var(--chip);color:var(--mute);white-space:nowrap}
+.pill.red{color:var(--red)}.pill.amber{color:var(--amber)}.pill.green{color:var(--green)}.pill.blue{color:var(--accent)}
+.ava{width:26px;height:26px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;color:#fff;flex:none}
+.people button{all:unset;cursor:pointer;display:inline-flex;align-items:center;gap:6px;margin:3px 8px 3px 0;padding:4px 8px 4px 4px;border-radius:999px;background:var(--chip)}
+.people button[aria-pressed=true]{outline:2px solid var(--accent)}
+.bar{height:6px;border-radius:4px;background:var(--line);overflow:hidden;margin:8px 0 2px}
+.bar i{display:block;height:100%;background:var(--green)}
+.bar i.amber{background:var(--amber)}.bar i.red{background:var(--red)}
+.card.stalled{border-left-color:var(--red);background:rgba(194,65,12,.06)}
+.card.stalled .title::before{content:"⚠ ";color:var(--red)}
+.filterbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0 0 10px;font-size:14px;color:var(--mute)}
 </style></head>
 <body>
 <header><div class="bar">
@@ -604,9 +636,11 @@ dialog::backdrop{background:rgba(0,0,0,.45)}
     <div class="row"><button class="primary" id="go">Masuk</button></div>
   </div>
   <div id="app" hidden>
+    <div class="alert" id="alert" hidden></div>
     <div class="help" id="guide"></div>
+    <div class="stat" id="stat"></div>
     <div class="chips" id="chips"></div>
-    <p class="people" id="people"></p>
+    <div class="people" id="people"></div>
     <div class="grid" id="board"></div>
     <details class="feed" id="feed"><summary>Aktivitas terbaru</summary><ul id="acts"></ul></details>
   </div>
@@ -627,23 +661,28 @@ dialog::backdrop{background:rgba(0,0,0,.45)}
 </form></dialog>
 <div class="toast" id="toast" hidden></div>
 
+
 <script>
 const KEY="unikan-token", FOLD="unikan-folded";
 const COLS=[
-  ["blocked","Butuh perhatian","Macet. Biasanya ada pertanyaan untuk owner."],
-  ["doing","Sedang dikerjakan","Sedang ditangani sekarang."],
-  ["todo","Menunggu dikerjakan","Sudah siap, menunggu giliran."],
-  ["backlog","Ide","Belum dijadwalkan. Owner bisa menjadikannya tugas."],
-  ["done","Selesai","Sudah beres. Dilipat supaya ringkas; ketuk untuk membuka."]];
+  ["blocked","⚠ Butuh perhatian","Macet atau menunggu jawaban owner. Paling penting."],
+  ["doing","⚙ Sedang dikerjakan","Sedang ditangani sekarang. Bar menunjukkan sisa waktu sebelum dianggap macet."],
+  ["todo","⏳ Menunggu dikerjakan","Sudah siap, menunggu giliran."],
+  ["backlog","💡 Ide","Belum dijadwalkan. Owner bisa menjadikannya tugas."],
+  ["done","✅ Selesai","Sudah beres. Dilipat supaya ringkas; ketuk judul untuk membuka."]];
+const PILL={blocked:["Terhambat","red"],doing:["Dikerjakan","amber"],todo:["Menunggu","blue"],backlog:["Ide",""],done:["Selesai","green"]};
 const $=id=>document.getElementById(id);
-let ME=null, token=null, lastSig="", live=false, folded={};
+let ME=null, token=null, lastSig="", live=false, folded={}, filter=null, lastData=null, stats=null;
 try{folded=JSON.parse(localStorage.getItem(FOLD)||"{}")}catch(e){folded={}}
 
 function tok(){return sessionStorage.getItem(KEY)||localStorage.getItem(KEY)}
 function el(tag,cls,text){const e=document.createElement(tag);if(cls)e.className=cls;if(text!=null)e.textContent=text;return e}
 let tt;function toast(m){const t=$("toast");t.textContent=m;t.hidden=false;clearTimeout(tt);tt=setTimeout(()=>t.hidden=true,3500)}
-function ago(ts){const d=Math.max(0,Date.now()/1000-ts);if(d<45)return"baru saja";if(d<3600)return Math.round(d/60)+" menit lalu";if(d<86400)return Math.round(d/3600)+" jam lalu";return Math.round(d/86400)+" hari lalu"}
+function mins(sec){sec=Math.max(0,Math.round(sec));if(sec<60)return sec+" dtk";if(sec<3600)return Math.round(sec/60)+" menit";if(sec<86400)return (sec/3600).toFixed(1).replace(".0","")+" jam";return Math.round(sec/86400)+" hari"}
+function ago(ts){const d=Math.max(0,Date.now()/1000-ts);return d<45?"baru saja":mins(d)+" lalu"}
 function clock(ts){return new Date(ts*1000).toLocaleString("id-ID",{day:"numeric",month:"short",hour:"2-digit",minute:"2-digit"})}
+function hue(name){let h=0;for(const ch of name)h=(h*31+ch.charCodeAt(0))%360;return h}
+function ava(name){const a=el("span","ava",name.slice(0,2).toUpperCase());a.style.background="hsl("+hue(name)+" 55% 42%)";return a}
 
 async function api(path,opts={}){
   const r=await fetch(path,{...opts,headers:{Authorization:"Bearer "+token,"Content-Type":"application/json"}});
@@ -652,36 +691,48 @@ async function api(path,opts={}){
   return data;
 }
 const isOwner=()=>ME&&ME.you===ME.owner;
+const isFolded=c=>c.id in folded?folded[c.id]:c.column==="done";
+function toggle(c){folded[c.id]=!isFolded(c);localStorage.setItem(FOLD,JSON.stringify(folded));render(lastData)}
 
 function sentence(c){
   switch(c.column){
     case"done":return c.created_by+" memberi tugas ke "+c.assignee+". Selesai.";
     case"doing":return c.assignee+" sedang mengerjakan tugas dari "+c.created_by+".";
-    case"blocked":return c.assignee+" berhenti dan butuh jawaban:";
+    case"blocked":return c.stalled?c.assignee+" tidak memberi kabar. Pekerjaannya bisa dilanjutkan atau diselesaikan olehnya.":c.assignee+" berhenti dan butuh jawaban:";
     case"todo":return"Dari "+c.created_by+" untuk "+c.assignee+". Belum dimulai.";
     default:return"Ide dari "+c.created_by+(c.assignee?" (untuk "+c.assignee+")":"")+".";
   }
 }
-function isFolded(c){return c.id in folded?folded[c.id]:c.column==="done"}
-function toggle(c){folded[c.id]=!isFolded(c);localStorage.setItem(FOLD,JSON.stringify(folded));render(lastData)}
-
 function button(label,cls,fn){const b=el("button",cls,label);b.onclick=async()=>{b.disabled=true;try{await fn()}catch(e){toast(e.message)}b.disabled=false};return b}
 async function move(id,to,body){await api("/cards/"+id+"/move",{method:"POST",body:JSON.stringify({to,...body})});toast("Berhasil");load()}
 
 function cardEl(c){
-  const box=el("div","card "+c.column+(isFolded(c)?" folded":""));
+  const now=Date.now()/1000;
+  const folded_=isFolded(c);
+  const box=el("div","card "+c.column+(c.stalled?" stalled":"")+(folded_?" folded":""));
   const head=el("button","head");
-  head.setAttribute("aria-expanded",String(!isFolded(c)));
-  head.appendChild(el("span","title",c.title));
+  head.setAttribute("aria-expanded",String(!folded_));
+  const top=el("span","title",c.title);
+  head.appendChild(top);
+  const p=PILL[c.column];
+  head.appendChild(el("span","pill "+(c.stalled?"red":p[1]),c.stalled?"Macet":p[0]));
   head.appendChild(el("span","chev","▼"));
   head.onclick=()=>toggle(c);
   box.appendChild(head);
   const body=el("div","body");
   body.appendChild(el("div","line",sentence(c)));
-  if(c.column==="blocked"&&c.question)body.appendChild(el("div","note",c.question));
+  if(c.column==="doing"){
+    const used=(now-c.updated)/c.ttl, pct=Math.min(100,Math.round(used*100));
+    const bar=el("div","bar"); const i=el("i",used>0.8?"red":used>0.5?"amber":"",""); i.style.width=pct+"%"; bar.appendChild(i);
+    body.appendChild(bar);
+    body.appendChild(el("div","line","Terakhir ada kabar "+ago(c.updated)+". Dianggap macet setelah "+mins(c.ttl)+" tanpa kabar."));
+  }
+  if(c.stalled)body.appendChild(el("div","note","Tidak ada kabar sejak "+ago(c.updated)+"."));
+  else if(c.column==="blocked"&&c.question)body.appendChild(el("div","note",c.question));
   else if(c.column==="done"&&c.result)body.appendChild(el("div","note",c.result));
   if(c.check)body.appendChild(el("div","line","Cara cek: "+c.check));
-  const t=el("div","line",c.id+" · dibuat "+clock(c.created)+" · diubah "+ago(c.updated)+(c.rework?" · diulang "+c.rework+"x":""));
+  const t=el("div","line","");
+  t.appendChild(document.createTextNode(c.id+" · dibuat "+clock(c.created)+" · "+(c.column==="done"?"selesai ":"diubah ")+ago(c.updated)+(c.rework?" · diulang "+c.rework+"x":"")));
   t.title=new Date(c.updated*1000).toLocaleString("id-ID");
   body.appendChild(t);
   if(isOwner()){
@@ -704,8 +755,10 @@ function cardEl(c){
 function describe(e){
   const what=e.title?("«"+e.title+"»"):"tugas (sudah dihapus)";
   if(e.frm==null)return e.actor+" membuat "+what;
+  if(e.to==="doing"&&e.frm==="blocked")return e.actor+" melanjutkan "+what;
   if(e.to==="doing")return e.actor+" mulai mengerjakan "+what;
   if(e.to==="done")return e.actor+" menyelesaikan "+what;
+  if(e.to==="blocked"&&(e.note||"").startsWith("timeout:"))return "Sistem: "+what+" macet, tidak ada kabar";
   if(e.to==="blocked")return e.actor+" berhenti di "+what+": "+(e.note||"");
   if(e.to==="todo"&&e.frm==="blocked")return e.actor+" mengulang "+what+(e.note?" — "+e.note:"");
   if(e.to==="todo")return e.actor+" menjadikan "+what+" tugas";
@@ -713,42 +766,51 @@ function describe(e){
   return e.actor+" memindahkan "+what+" ke "+e.to;
 }
 
-let lastData=null;
 function render(data){
   lastData=data; const [cards,acts]=data;
-  $("who").textContent=(isOwner()?"Owner":"Lihat saja")+" · "+ME.you;
-  $("new").hidden=!isOwner();
   const owner=isOwner();
+  const stalled=cards.filter(c=>c.stalled).length, blocked=cards.filter(c=>c.column==="blocked").length;
+  document.title=(stalled||blocked?"("+(stalled||blocked)+") ":"")+"unikan";
+  $("who").textContent=(owner?"Owner":"Lihat saja")+" · "+ME.you;
+  $("new").hidden=!owner;
   $("guide").innerHTML="";
   $("guide").appendChild(el("b",null,owner?"Kamu bisa mengatur semua tugas":"Mode lihat saja"));
   $("guide").appendChild(el("div",null,owner
-    ?"Kolom paling atas adalah yang perlu perhatian. Ketuk judul kartu untuk membuka atau melipat. Tombol \"+ Tugas\" di kanan atas untuk tugas baru."
-    :"Setiap kartu menunjukkan siapa memberi tugas kepada siapa, dan sudah sampai mana. Ketuk judul untuk membuka detail."));
+    ?"Kolom paling atas adalah yang perlu perhatian. Ketuk judul kartu untuk membuka atau melipat. \"+ Tugas\" untuk tugas baru."
+    :"Ketuk judul kartu untuk membuka detail. Ketuk nama orang di bawah untuk melihat tugasnya saja."));
+  const alert=$("alert"); alert.textContent=""; alert.hidden=!(stalled||blocked);
+  if(stalled||blocked){const b=el("b",null,(stalled?stalled+" tugas macet":"")+(stalled&&blocked-stalled?" · ":"")+(blocked-stalled?(blocked-stalled)+" menunggu jawaban":""));
+    alert.appendChild(b); alert.appendChild(document.createTextNode(" — lihat kolom paling atas."));}
   const count=k=>cards.filter(c=>c.column===k).length;
   const chips=$("chips"); chips.textContent="";
-  [["blocked","Terhambat","red"],["doing","Dikerjakan","amber"],["todo","Menunggu","" ],["backlog","Ide",""],["done","Selesai","green"]].forEach(([k,l,cl])=>{
+  const today=new Date().toDateString();
+  const doneToday=cards.filter(c=>c.column==="done"&&new Date(c.updated*1000).toDateString()===today).length;
+  [["blocked","Butuh perhatian","red"],["doing","Dikerjakan","amber"],["todo","Menunggu",""],["backlog","Ide",""],["done","Selesai","green"]].forEach(([k,l,cl])=>{
     const c=el("span","chip "+cl); c.appendChild(el("b",null,String(count(k)))); c.appendChild(document.createTextNode(l)); chips.appendChild(c);
   });
-  const people={}; cards.filter(c=>c.column!=="done"&&c.column!=="backlog").forEach(c=>{
+  const st=$("stat"); st.textContent="";
+  const add=(label,val)=>{const s=el("span",null,label+" ");s.appendChild(el("b",null,val));st.appendChild(s)};
+  add("Selesai hari ini",String(doneToday));
+  if(stats&&stats.avg_work_seconds!=null)add("Rata-rata waktu kerja",mins(stats.avg_work_seconds));
+  if(stats&&stats.avg_claim_seconds!=null)add("Rata-rata sampai diambil",mins(stats.avg_claim_seconds));
+  const people={}; cards.forEach(c=>{if(c.column==="done"||c.column==="backlog")return;
     const p=people[c.assignee]||(people[c.assignee]={todo:0,doing:0,blocked:0});p[c.column]++});
   const pe=$("people"); pe.textContent="";
-  const names=Object.keys(people);
-  if(names.length){pe.appendChild(document.createTextNode("Siapa sedang apa: "));
-    names.forEach((n,i)=>{const p=people[n];const parts=[];
-      if(p.doing)parts.push(p.doing+" dikerjakan");
-      if(p.todo)parts.push(p.todo+" menunggu");
-      if(p.blocked)parts.push(p.blocked+" terhambat");
-      pe.appendChild(el("b",null,n));
-      pe.appendChild(document.createTextNode(" "+parts.join(", ")+(i<names.length-1?"  ·  ":"")));});
-  } else pe.textContent="Tidak ada yang sedang mengerjakan tugas.";
+  const names=Object.keys(people).sort();
+  names.forEach(n=>{const p=people[n];const b=el("button");b.setAttribute("aria-pressed",String(filter===n));
+    b.appendChild(ava(n)); b.appendChild(el("b",null,n));
+    const parts=[]; if(p.doing)parts.push(p.doing+" jalan"); if(p.todo)parts.push(p.todo+" antre"); if(p.blocked)parts.push(p.blocked+" macet");
+    b.appendChild(document.createTextNode(parts.join(" · ")));
+    b.onclick=()=>{filter=filter===n?null:n;render(lastData)}; pe.appendChild(b)});
+  if(!names.length)pe.textContent="Tidak ada yang sedang mengerjakan tugas.";
   const board=$("board"); board.textContent="";
   for(const [key,label,desc] of COLS){
-    const list=cards.filter(c=>c.column===key);
+    const list=cards.filter(c=>c.column===key&&(!filter||c.assignee===filter));
     if(key==="backlog"&&!list.length)continue;
     const col=el("section","col");
     const h=el("h2",null,label); h.appendChild(el("span",null,String(list.length)));
     col.appendChild(h); col.appendChild(el("p",null,desc));
-    if(!list.length)col.appendChild(el("div","empty","Kosong"));
+    if(!list.length)col.appendChild(el("div","empty",filter?"Tidak ada untuk "+filter+".":"Kosong"));
     list.forEach(c=>col.appendChild(cardEl(c)));
     board.appendChild(col);
   }
@@ -761,9 +823,10 @@ async function load(){
   if(!token){showLogin();return}
   try{
     if(!ME)ME=await api("/meta");
-    const [cards,acts]=await Promise.all([api("/cards"),api("/activity?limit=30")]);
+    const [cards,acts,st]=await Promise.all([api("/cards"),api("/activity?limit=30"),api("/stats")]);
+    stats=st;
     $("login").hidden=true;$("app").hidden=false;$("logout").hidden=false;
-    const sig=JSON.stringify([cards,acts]);
+    const sig=JSON.stringify([cards,acts,st.avg_work_seconds,st.avg_claim_seconds]);
     if(sig!==lastSig){lastSig=sig;render([cards,acts])}
   }catch(e){
     if(e.status===401){logout();toast("Token tidak dikenal. Masukkan lagi.");return}
@@ -780,10 +843,8 @@ async function stream(){
       const r=await fetch("/stream",{headers:{Authorization:"Bearer "+token}});
       if(r.status===401){logout();toast("Token tidak dikenal. Masukkan lagi.");return}
       if(!r.ok)throw new Error("status "+r.status);
-      setLive(true,"langsung");
-      load();
-      const rd=r.body.getReader(), dec=new TextDecoder();
-      let buf="";
+      setLive(true,"langsung"); load();
+      const rd=r.body.getReader(), dec=new TextDecoder(); let buf="";
       for(;;){
         const {value,done}=await rd.read(); if(done)break;
         buf+=dec.decode(value,{stream:true});
@@ -794,6 +855,7 @@ async function stream(){
     await new Promise(r=>setTimeout(r,3000));
   }
 }
+setInterval(()=>{if(token&&ME)load()},20000);   // refreshes "time ago" labels and the stall bar
 
 $("new").onclick=()=>{
   if(!isOwner())return;
@@ -821,7 +883,6 @@ $("go").onclick=()=>{
 };
 $("tok").addEventListener("keydown",e=>{if(e.key==="Enter")$("go").click()});
 $("logout").onclick=logout;
-setInterval(()=>{if(token&&ME&&!live)load()},10000);
 token=tok(); if(token){load();stream()} else showLogin();
 </script>
 </body></html>
