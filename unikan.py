@@ -36,7 +36,7 @@ SECRETS = CONF_DIR / "secrets"
 
 COLS = ("backlog", "todo", "doing", "blocked", "done")
 ID_RE = re.compile(r"^[0-9a-f]{6}$")
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 RELEASE_API = os.environ.get("UNIKAN_RELEASE_API", "https://api.github.com/repos/zalldz/unikan/releases/latest")
 RAW_BASE = os.environ.get("UNIKAN_RAW_BASE", "https://raw.githubusercontent.com/zalldz/unikan")
 MAX_UPDATE_BYTES = 512 * 1024
@@ -296,6 +296,21 @@ class Board:
             self.wake(assignee, cid)
         return self.get(cid)
 
+    def delete(self, actor: str, cid: str) -> dict:
+        if actor != self.owner:
+            raise KBError(403, "only the owner may delete cards")
+        c = db()
+        try:
+            c.execute("BEGIN IMMEDIATE")
+            if not c.execute("SELECT 1 FROM cards WHERE id=?", (cid,)).fetchone():
+                c.execute("ROLLBACK"); raise KBError(404, "card not found")
+            c.execute("DELETE FROM events WHERE card=?", (cid,))
+            c.execute("DELETE FROM cards WHERE id=?", (cid,))
+            c.execute("COMMIT")
+        finally:
+            c.close()
+        return {"deleted": cid}
+
     def touch(self, actor: str, cid: str) -> dict:
         c = db()
         try:
@@ -512,6 +527,8 @@ def make_handler(board: Board):
                     if len(parts) == 3 and method == "POST" and parts[2] == "move":
                         d = self._body()
                         return self._send(200, board.move(actor, cid, d.get("to"), d))
+                    if len(parts) == 2 and method == "DELETE":
+                        return self._send(200, board.delete(actor, cid))
                     if len(parts) == 3 and method == "POST" and parts[2] == "touch":
                         return self._send(200, board.touch(actor, cid))
                 raise KBError(404, "not found")
@@ -523,6 +540,7 @@ def make_handler(board: Board):
 
         def do_GET(self): self._route("GET")
         def do_POST(self): self._route("POST")
+        def do_DELETE(self): self._route("DELETE")
 
     return H
 
@@ -757,6 +775,7 @@ def main() -> None:
     p.add_argument("--url", help="server URL (or UNIKAN_URL)")
     sp = p.add_subparsers(dest="cmd", required=True)
     sp.add_parser("serve")
+    dl = sp.add_parser("delete", help="owner only: remove a card and its history"); dl.add_argument("id")
     up = sp.add_parser("update", help="fetch the latest unikan.py from GitHub")
     up.add_argument("--check", action="store_true", help="only check, do not replace")
     sp.add_parser("version")
@@ -822,6 +841,8 @@ def main() -> None:
         for c in call(args, "GET", f"/cards?column=todo&assignee={me}&wait={w}", timeout=20 + w):
             print(line(c))
         return
+    if args.cmd == "delete":
+        print(json.dumps(call(args, "DELETE", f"/cards/{args.id}"))); return
     if args.cmd == "show":
         print(json.dumps(call(args, "GET", f"/cards/{args.id}"), ensure_ascii=False, indent=1)); return
     moves = {"claim": ("doing", {}), "promote": ("todo", {}), "shelve": ("backlog", {})}

@@ -51,6 +51,7 @@ python3 unikan.py --as rina next            # tugas untuk rina
 python3 unikan.py --as rina claim <id>      # rina mulai mengerjakan
 python3 unikan.py --as rina done <id> --result "Sudah, ini ringkasannya ..."
 python3 unikan.py --as ani ls --all         # lihat seluruh papan
+python3 unikan.py --as ani delete <id>      # hanya owner: hapus kartu beserta riwayatnya
 ```
 Ganti `<id>` dengan kode 6 karakter yang muncul saat membuat kartu.
 
@@ -111,6 +112,16 @@ Secara default papan hanya bisa diakses dari komputer yang sama (`127.0.0.1`). U
 
 ## Untuk agen luar
 Lihat [docs/AGEN-LUAR.md](docs/AGEN-LUAR.md): cara terhubung dan perintah harian untuk agen yang berjalan di luar server owner.
+
+## Batasan yang perlu diketahui
+- **Membangunkan agen** lewat `notify` hanya untuk agen yang berjalan di server yang sama. Agen di perangkat lain cukup menjalankan `next --wait 30`, yang menahan permintaan sampai ada kartu baru.
+- **Update** hanya mengambil rilis tag di GitHub. File dengan nomor versi yang tidak cocok dengan tag ditolak.
+- **Keamanan jaringan:** tidak ada enkripsi transport. Jaringan privat (Tailscale) menjadi pagarnya.
+
+## English (short)
+unikan is a small task board for AI agent teams: SQLite + HTTP + CLI, standard library only.
+Try it: `python3 unikan.py demo`. Set up: `python3 unikan.py init --owner you --agents a,b`, then `python3 unikan.py serve`.
+Agents claim cards with `next --wait 30`, `claim`, `done --result`, or `block --question`. Rules are enforced by the server, based on the token each agent holds. Guide for outside agents: docs/AGEN-LUAR.md.
 
 ## Tes
 ```bash

@@ -10,6 +10,11 @@ def free_port():
     s = socket.socket(); s.bind(("127.0.0.1", 0)); p = s.getsockname()[1]; s.close(); return p
 
 
+def db_sqlite(e):
+    import sqlite3
+    return sqlite3.connect(e.data / "unikan.db")
+
+
 class Env:
     def __init__(self, notify=None, serialize=(), **extra):
         self.tmp = tempfile.TemporaryDirectory()
@@ -323,6 +328,26 @@ class Demo(unittest.TestCase):
         self.assertEqual(set(glob.glob(os.path.join(tempfile.gettempdir(), "unikan-demo-*"))), before)
 
 
+class Delete(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls): cls.e = Env()
+    @classmethod
+    def tearDownClass(cls): cls.e.close()
+
+    def test_only_owner_deletes_and_history_goes_too(self):
+        e = self.e
+        cid = e.add("alice")
+        e.mv("alice", cid, "doing")
+        self.assertEqual(e.req("alice", "DELETE", f"/cards/{cid}")[0], 403)
+        self.assertEqual(e.req("lead", "DELETE", f"/cards/{cid}")[0], 403)
+        self.assertEqual(e.req("owner", "GET", f"/cards/{cid}")[0], 200)
+        r = e.cli("owner", "delete", cid)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(e.req("owner", "GET", f"/cards/{cid}")[0], 404)
+        self.assertEqual(e.req("owner", "DELETE", f"/cards/{cid}")[0], 404)
+        c = db_sqlite(e)
+        self.assertEqual(c.execute("SELECT COUNT(*) FROM events WHERE card=?", (cid,)).fetchone()[0], 0)
+
 class LongPoll(unittest.TestCase):
     @classmethod
     def setUpClass(cls): cls.e = Env()
@@ -432,6 +457,26 @@ class Update(unittest.TestCase):
         r = self.run_update()
         self.assertNotEqual(r.returncode, 0); self.assertIn("no VERSION", r.stderr)
         self.assertEqual(self.me.read_text(), before)
+
+
+class Restore(unittest.TestCase):
+    def test_backup_restores_to_identical_board(self):
+        import shutil, sqlite3
+        e = Env()
+        try:
+            cid = e.add("alice"); e.mv("alice", cid, "doing"); e.mv("alice", cid, "done", result="ok")
+            out = subprocess.run([sys.executable, UNIKAN, "backup"], env=e.env, capture_output=True, text=True)
+            self.assertEqual(out.returncode, 0, out.stderr)
+            bak = Path(out.stdout.strip())
+            fresh = Path(tempfile.mkdtemp()) / "unikan.db"
+            shutil.copy(bak, fresh)                       # restore = put the backup file back as the db
+            c = sqlite3.connect(fresh)
+            self.assertEqual(c.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+            self.assertEqual(c.execute("SELECT col, result FROM cards WHERE id=?", (cid,)).fetchone(), ("done", "ok"))
+            self.assertEqual(c.execute("SELECT COUNT(*) FROM events WHERE card=?", (cid,)).fetchone()[0], 3)
+            c.close()
+        finally:
+            e.close()
 
 
 if __name__ == "__main__":
