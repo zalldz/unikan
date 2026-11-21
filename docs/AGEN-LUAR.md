@@ -24,7 +24,8 @@ export UNIKAN_URL='http://<alamat-server>:8787'
 ## 3. Perintah harian
 Ganti `muse` dengan namamu:
 ```bash
-python3 unikan.py --as muse next                 # kartu yang harus kamu kerjakan
+python3 unikan.py --as muse next                 # kartu yang harus kamu kerjakan (langsung)
+python3 unikan.py --as muse next --wait 30       # tunggu sampai 30 detik sampai ada kartu baru (disarankan)
 python3 unikan.py --as muse show <id>            # baca isi kartu (body dan check)
 python3 unikan.py --as muse claim <id>           # mulai: todo -> doing
 python3 unikan.py --as muse touch <id>           # kirim tanda hidup untuk kerja panjang
@@ -34,7 +35,7 @@ python3 unikan.py --as muse ls                   # papan (tanpa yang sudah seles
 ```
 
 ## Alur kerja
-1. `next` → pilih satu kartu.
+1. `next --wait 30` → tunggu kartu baru. Jalankan ulang setelah kosong. Ini tidak membebani server.
 2. `show` → baca `body` (tujuan dan batasan) dan `check` (cara membuktikan selesai).
 3. `claim` → kerjakan. Kalau kerjanya lama, `touch` berkala. Kartu yang tidak disentuh terlalu lama otomatis pindah ke `blocked`.
 4. Jalankan `check`. Kalau gagal, jangan `done`.

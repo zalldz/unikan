@@ -158,6 +158,15 @@ class Board:
         finally:
             c.close()
 
+    def wait_list(self, col: str | None, assignee: str | None, wait: int) -> list[dict]:
+        """Long-poll: return as soon as matching cards exist, else after `wait` seconds (empty)."""
+        deadline = time.time() + min(max(wait, 0), 30)
+        while True:
+            rows = self.list(col, assignee)
+            if rows or time.time() >= deadline:
+                return rows
+            time.sleep(0.5)
+
     def get(self, cid: str) -> dict:
         c = db()
         try:
@@ -481,7 +490,11 @@ def make_handler(board: Board):
                 qs = parse_qs(u.query)
                 one = lambda k: (qs.get(k) or [None])[0]
                 if parts == ["cards"] and method == "GET":
-                    return self._send(200, board.list(one("column"), one("assignee")))
+                    try:
+                        wait = int(one("wait") or 0)
+                    except ValueError:
+                        raise KBError(400, "wait must be a number of seconds")
+                    return self._send(200, board.wait_list(one("column"), one("assignee"), wait))
                 if parts == ["cards"] and method == "POST":
                     return self._send(201, board.create(actor, self._body()))
                 if parts == ["stats"] and method == "GET":
@@ -560,7 +573,7 @@ def _token(name: str) -> str:
         sys.exit(f"unikan: no token for '{name}' (set UNIKAN_TOKEN or create {SECRETS}/{name}.token)")
 
 
-def call(args, method: str, path: str, body: dict | None = None):
+def call(args, method: str, path: str, body: dict | None = None, timeout: int = 20):
     name = args.who or os.environ.get("UNIKAN_AS")
     if not name:
         sys.exit("unikan: say who you are: --as NAME or UNIKAN_AS=NAME")
@@ -570,7 +583,7 @@ def call(args, method: str, path: str, body: dict | None = None):
                                  headers={"Authorization": "Bearer " + _token(name),
                                           "Content-Type": "application/json"})
     try:
-        with urllib.request.urlopen(req, timeout=20) as r:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.load(r)
     except urllib.error.HTTPError as e:
         try:
@@ -711,7 +724,7 @@ def main() -> None:
     a.add_argument("--body", default=""); a.add_argument("--check", default="")
     a.add_argument("--backlog", action="store_true"); a.add_argument("--ttl", type=int)
     l = sp.add_parser("ls"); l.add_argument("--col"); l.add_argument("--to"); l.add_argument("--all", action="store_true")
-    sp.add_parser("next")
+    nx = sp.add_parser("next"); nx.add_argument("--wait", type=int, default=0, help="wait up to N seconds (max 30) for a card")
     for n in ("show", "claim", "touch", "promote"):
         x = sp.add_parser(n); x.add_argument("id")
     d = sp.add_parser("done"); d.add_argument("id"); d.add_argument("--result", required=True)
@@ -749,7 +762,8 @@ def main() -> None:
         return
     if args.cmd == "next":
         me = args.who or os.environ.get("UNIKAN_AS")
-        for c in call(args, "GET", f"/cards?column=todo&assignee={me}"):
+        w = max(0, min(args.wait, 30))
+        for c in call(args, "GET", f"/cards?column=todo&assignee={me}&wait={w}", timeout=20 + w):
             print(line(c))
         return
     if args.cmd == "show":

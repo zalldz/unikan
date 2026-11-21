@@ -323,5 +323,34 @@ class Demo(unittest.TestCase):
         self.assertEqual(set(glob.glob(os.path.join(tempfile.gettempdir(), "unikan-demo-*"))), before)
 
 
+class LongPoll(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls): cls.e = Env()
+    @classmethod
+    def tearDownClass(cls): cls.e.close()
+
+    def test_returns_as_soon_as_a_card_arrives(self):
+        e = self.e
+        def later():
+            time.sleep(1.5); e.add("alice")
+        threading.Thread(target=later, daemon=True).start()
+        t0 = time.time()
+        r = e.cli("alice", "next", "--wait", "20")
+        dt = time.time() - t0
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(r.stdout.strip(), "expected the new card")
+        self.assertLess(dt, 8, f"took {dt:.1f}s, should return right after the card arrives")
+
+    def test_times_out_empty(self):
+        t0 = time.time()
+        r = self.e.cli("bob", "next", "--wait", "2")
+        dt = time.time() - t0
+        self.assertEqual((r.returncode, r.stdout.strip()), (0, ""))
+        self.assertTrue(1.5 < dt < 8, dt)
+
+    def test_bad_wait_rejected(self):
+        self.assertEqual(self.e.req("bob", "GET", "/cards?column=todo&wait=abc")[0], 400)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
