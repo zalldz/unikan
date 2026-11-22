@@ -37,7 +37,7 @@ SECRETS = CONF_DIR / "secrets"
 
 COLS = ("backlog", "todo", "doing", "blocked", "done")
 ID_RE = re.compile(r"^[0-9a-f]{6}$")
-VERSION = "0.9.0"
+VERSION = "0.9.1"
 RELEASE_API = os.environ.get("UNIKAN_RELEASE_API", "https://api.github.com/repos/zalldz/unikan/releases/latest")
 RAW_BASE = os.environ.get("UNIKAN_RAW_BASE", "https://raw.githubusercontent.com/zalldz/unikan")
 MAX_UPDATE_BYTES = 512 * 1024
