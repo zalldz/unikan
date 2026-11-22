@@ -65,8 +65,8 @@ DEFAULT_CFG = {
     "wake_timeout": 1800,
     "reap_interval": 30,
     "notify": {},                   # agent -> argv list, "{id}" substituted
-    "serialize": [],
-    "on_event": [],                 # e.g. ["python3", "/path/send.py", "{text}"]; empty = off                # agents whose wake commands never overlap (RAM)
+    "serialize": [],                # agents whose wake commands never overlap (RAM)
+    "on_event": [],                 # e.g. ["python3", "/path/send.py", "{text}"]; empty = off
 }
 
 
@@ -167,7 +167,9 @@ def _changed() -> None:
 class Board:
     def __init__(self, cfg: dict, wake=None, event=None):
         self.cfg, self.wake, self.event = cfg, wake, event
-        self.workers, self.creators, _ = roles(cfg)
+        self.workers, self.creators, names = roles(cfg)
+        if "system" in names:  # internal actor with owner-level move rights
+            raise ValueError("'system' is reserved; rename it in config.json")
         self.owner = cfg["owner"]
 
     # -- reads
@@ -314,6 +316,8 @@ class Board:
                 elif key in (("doing", "blocked"), ("todo", "blocked")):
                     if not (me or priv):
                         raise KBError(403, "only the assignee may block")
+                    if actor == "system" and frm == "doing" and r["updated"] + r["ttl"] >= now:
+                        raise KBError(409, "touched since the reaper looked; not stale")  # reap() race
                     if not question:
                         raise KBError(400, "question is required")
                     upd["question"] = question
@@ -834,13 +838,15 @@ async function load(){
   }
 }
 function showLogin(){$("login").hidden=false;$("app").hidden=true;$("logout").hidden=true;$("new").hidden=true;$("tok").focus()}
-function logout(){sessionStorage.removeItem(KEY);localStorage.removeItem(KEY);token=null;ME=null;lastSig="";showLogin()}
+function logout(){gen++;if(ctl)ctl.abort();sessionStorage.removeItem(KEY);localStorage.removeItem(KEY);token=null;ME=null;lastSig="";showLogin()}
 
 function setLive(on,txt){live=on;$("live").classList.toggle("on",on);$("livetxt").textContent=txt}
+let gen=0, ctl=null;
 async function stream(){
-  while(token){
+  const my=++gen; if(ctl)ctl.abort(); ctl=new AbortController(); const sig=ctl.signal;  // one stream loop only
+  while(token&&my===gen){
     try{
-      const r=await fetch("/stream",{headers:{Authorization:"Bearer "+token}});
+      const r=await fetch("/stream",{headers:{Authorization:"Bearer "+token},signal:sig});
       if(r.status===401){logout();toast("Token tidak dikenal. Masukkan lagi.");return}
       if(!r.ok)throw new Error("status "+r.status);
       setLive(true,"langsung"); load();
@@ -851,6 +857,7 @@ async function stream(){
         let i; while((i=buf.indexOf("\n\n"))>=0){const block=buf.slice(0,i);buf=buf.slice(i+2);if(block.includes("event: change"))load()}
       }
     }catch(e){}
+    if(my!==gen)return;
     setLive(false,"menyambung ulang…");
     await new Promise(r=>setTimeout(r,3000));
   }
@@ -892,6 +899,7 @@ token=tok(); if(token){load();stream()} else showLogin();
 def make_handler(board: Board):
     class H(BaseHTTPRequestHandler):
         server_version = "unikan"
+        timeout = 60  # idle/slow sockets (no headers, trickled body) free their thread; streams ping every 15s
 
         def log_message(self, fmt, *a):
             sys.stderr.write("%s %s\n" % (self.address_string(), fmt % a))
@@ -905,7 +913,12 @@ def make_handler(board: Board):
             self.wfile.write(data)
 
         def _body(self) -> dict:
-            n = int(self.headers.get("Content-Length") or 0)
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                raise KBError(400, "bad Content-Length")
+            if n < 0:  # rfile.read(-1) would block until the client hangs up
+                raise KBError(400, "bad Content-Length")
             if n > MAX_BODY:
                 raise KBError(413, "body too large")
             if n == 0:
