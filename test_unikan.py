@@ -524,6 +524,7 @@ class View(unittest.TestCase):
         with urllib.request.urlopen(self.e.url + "/view", timeout=5) as r:
             body = r.read().decode()
             self.assertIn("text/html", r.headers["Content-Type"])
+            self.assertEqual(r.headers["X-Frame-Options"], "DENY")   # cannot be framed (clickjacking)
         self.assertIn("unikan", body)
         self.assertNotIn("Bearer " + self.e.tok("owner"), body)
 
@@ -661,6 +662,20 @@ class BoardDirect(unittest.TestCase):
     def test_system_is_a_reserved_name(self):
         with self.assertRaises(ValueError):
             self.u.Board(dict(self.cfg, agents=["bob", "system"]))
+
+    def test_names_that_would_escape_the_secrets_dir_are_refused(self):
+        for bad in ("../x", "a/b", "", ".hidden", "a b"):
+            with self.assertRaises(ValueError, msg=bad):
+                self.u.Board(dict(self.cfg, agents=["bob", bad]))
+        self.u.Board(dict(self.cfg, viewers=None))   # null viewers in config is fine
+
+    def test_control_chars_are_stripped_from_text(self):
+        b = self.u.Board(self.cfg)
+        c = b.create("owner", {"title": "a\x1b[2Jb\x9bc", "body": "x\ny\tz", "assignee": "bob"})
+        self.assertEqual((c["title"], c["body"]), ("a[2Jbc", "x\ny\tz"))
+
+    def test_data_dir_is_private(self):
+        self.assertEqual(os.stat(self.tmp.name).st_mode & 0o777, 0o700)
 
 
 if __name__ == "__main__":

@@ -21,6 +21,7 @@ import sys
 import threading
 import time
 import traceback
+import unicodedata
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -74,11 +75,18 @@ def mins_text(sec: int) -> str:
     return f"{sec} detik" if sec < 60 else f"{sec // 60} menit"
 
 
+NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,31}$")  # names become token file names: no "/" etc.
+
+
 def roles(cfg: dict) -> tuple[list, list, list]:
     """(workers, creators, all names). The owner is always a creator; "system" is internal only."""
     workers = list(cfg["agents"])
     creators = list(cfg["bosses"]) + [cfg["owner"]]
-    return workers, creators, workers + creators + list(cfg.get("viewers", []))
+    names = workers + creators + list(cfg.get("viewers") or [])
+    bad = [n for n in names if not isinstance(n, str) or n == "system" or not NAME_RE.match(n)]
+    if bad:  # "system" is the internal actor with owner-level move rights
+        raise ValueError(f"bad name(s) in config: {bad}; use letters, digits, _ . - (and not 'system')")
+    return workers, creators, names
 
 
 def load_cfg() -> dict:
@@ -124,6 +132,7 @@ def db() -> sqlite3.Connection:
 
 def init_db() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    os.chmod(DATA_DIR, 0o700)  # cards and backups are private to this OS user
     c = db()
     c.execute("PRAGMA journal_mode=WAL")
     c.execute("PRAGMA synchronous=NORMAL")
@@ -145,7 +154,8 @@ def _text(d: dict, key: str, limit: int, required: bool = False) -> str:
         v = ""
     if not isinstance(v, str):
         raise KBError(400, f"{key} must be a string")
-    v = v.strip()
+    # drop control chars (ANSI/C1 escapes would reach terminals via `ls`/`show`); keep newline and tab
+    v = "".join(ch for ch in v if ch in "\n\t" or unicodedata.category(ch) != "Cc").strip()
     if required and not v:
         raise KBError(400, f"{key} is required")
     if len(v) > limit:
@@ -167,9 +177,7 @@ def _changed() -> None:
 class Board:
     def __init__(self, cfg: dict, wake=None, event=None):
         self.cfg, self.wake, self.event = cfg, wake, event
-        self.workers, self.creators, names = roles(cfg)
-        if "system" in names:  # internal actor with owner-level move rights
-            raise ValueError("'system' is reserved; rename it in config.json")
+        self.workers, self.creators, _ = roles(cfg)
         self.owner = cfg["owner"]
 
     # -- reads
@@ -943,6 +951,8 @@ def make_handler(board: Board):
                     self.send_header("Content-Type", "text/html; charset=utf-8")
                     self.send_header("Content-Length", str(len(data)))
                     self.send_header("Cache-Control", "no-store")
+                    self.send_header("Content-Security-Policy", "frame-ancestors 'none'")  # no clickjacking of owner buttons
+                    self.send_header("X-Frame-Options", "DENY")
                     self.end_headers()
                     return self.wfile.write(data)
                 if method == "GET" and parts == ["health"]:
@@ -1143,8 +1153,10 @@ def init_cmd(args) -> None:
     cfg = dict(DEFAULT_CFG)
     cfg.update(owner=args.owner, agents=split(args.agents), bosses=split(args.bosses),
                port=args.port, url=f"http://127.0.0.1:{args.port}")
-    if not args.owner or " " in args.owner:
-        sys.exit("unikan: --owner must be one word")
+    try:
+        roles(cfg)
+    except ValueError as e:
+        sys.exit(f"unikan: {e}")
     CONF_DIR.mkdir(parents=True, exist_ok=True)
     cfile.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n")
     for name in roles(cfg)[2]:
