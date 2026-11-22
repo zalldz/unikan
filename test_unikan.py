@@ -170,6 +170,15 @@ class Rules(unittest.TestCase):
         with self.assertRaises((urllib.error.HTTPError, urllib.error.URLError, ConnectionError)): urllib.request.urlopen(r)
         self.assertEqual(e.req("bob", "GET", "/health")[0], 200)   # still alive
 
+    def test_bad_content_length_is_rejected_not_hung(self):
+        e = self.e
+        for cl in ("-1", "abc"):
+            s = socket.create_connection(("127.0.0.1", e.port), timeout=5)
+            s.sendall(f"POST /cards HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {e.tok('lead')}\r\n"
+                      f"Content-Length: {cl}\r\n\r\n".encode())
+            self.assertIn(b" 400 ", s.recv(200), cl)   # before: -1 hung forever, abc gave 500
+            s.close()
+
     def test_cli_roundtrip(self):
         e = self.e
         r = e.cli("lead", "add", "cli card", "--to", "bob", "--check", "echo ok"); self.assertEqual(r.returncode, 0, r.stderr)
@@ -515,6 +524,7 @@ class View(unittest.TestCase):
         with urllib.request.urlopen(self.e.url + "/view", timeout=5) as r:
             body = r.read().decode()
             self.assertIn("text/html", r.headers["Content-Type"])
+            self.assertEqual(r.headers["X-Frame-Options"], "DENY")   # cannot be framed (clickjacking)
         self.assertIn("unikan", body)
         self.assertNotIn("Bearer " + self.e.tok("owner"), body)
 
@@ -624,6 +634,48 @@ class Stall(unittest.TestCase):
         e.mv("alice", cid, "blocked", question="butuh API key")
         self.assertFalse(e.req("alice", "GET", f"/cards/{cid}")[1]["stalled"])
         self.assertEqual(e.mv("alice", cid, "done", result="x")[0], 409)
+
+
+class BoardDirect(unittest.TestCase):
+    """Board in-process, for races the HTTP layer cannot time reliably."""
+    def setUp(self):
+        import importlib.util
+        self.tmp = tempfile.TemporaryDirectory()
+        os.environ["UNIKAN_DATA"] = self.tmp.name
+        spec = importlib.util.spec_from_file_location("unikan_direct", UNIKAN)
+        self.u = importlib.util.module_from_spec(spec); spec.loader.exec_module(self.u)
+        del os.environ["UNIKAN_DATA"]
+        self.u.init_db()
+        self.cfg = dict(self.u.DEFAULT_CFG, owner="owner", agents=["bob"], min_ttl=1)
+
+    def tearDown(self): self.tmp.cleanup()
+
+    def test_reaper_does_not_block_a_card_touched_after_its_scan(self):
+        b = self.u.Board(self.cfg)
+        cid = b.create("owner", {"title": "t", "assignee": "bob", "ttl": 60})["id"]
+        b.move("bob", cid, "doing")
+        with self.assertRaises(self.u.KBError) as cm:   # what reap() does if its scan is stale
+            b.move("system", cid, "blocked", {"question": self.u.STALL + " x"})
+        self.assertEqual(cm.exception.code, 409)
+        self.assertEqual(b.get(cid)["column"], "doing")
+
+    def test_system_is_a_reserved_name(self):
+        with self.assertRaises(ValueError):
+            self.u.Board(dict(self.cfg, agents=["bob", "system"]))
+
+    def test_names_that_would_escape_the_secrets_dir_are_refused(self):
+        for bad in ("../x", "a/b", "", ".hidden", "a b"):
+            with self.assertRaises(ValueError, msg=bad):
+                self.u.Board(dict(self.cfg, agents=["bob", bad]))
+        self.u.Board(dict(self.cfg, viewers=None))   # null viewers in config is fine
+
+    def test_control_chars_are_stripped_from_text(self):
+        b = self.u.Board(self.cfg)
+        c = b.create("owner", {"title": "a\x1b[2Jb\x9bc", "body": "x\ny\tz", "assignee": "bob"})
+        self.assertEqual((c["title"], c["body"]), ("a[2Jbc", "x\ny\tz"))
+
+    def test_data_dir_is_private(self):
+        self.assertEqual(os.stat(self.tmp.name).st_mode & 0o777, 0o700)
 
 
 if __name__ == "__main__":

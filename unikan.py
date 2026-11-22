@@ -21,6 +21,7 @@ import sys
 import threading
 import time
 import traceback
+import unicodedata
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -65,8 +66,8 @@ DEFAULT_CFG = {
     "wake_timeout": 1800,
     "reap_interval": 30,
     "notify": {},                   # agent -> argv list, "{id}" substituted
-    "serialize": [],
-    "on_event": [],                 # e.g. ["python3", "/path/send.py", "{text}"]; empty = off                # agents whose wake commands never overlap (RAM)
+    "serialize": [],                # agents whose wake commands never overlap (RAM)
+    "on_event": [],                 # e.g. ["python3", "/path/send.py", "{text}"]; empty = off
 }
 
 
@@ -74,11 +75,18 @@ def mins_text(sec: int) -> str:
     return f"{sec} detik" if sec < 60 else f"{sec // 60} menit"
 
 
+NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,31}$")  # names become token file names: no "/" etc.
+
+
 def roles(cfg: dict) -> tuple[list, list, list]:
     """(workers, creators, all names). The owner is always a creator; "system" is internal only."""
     workers = list(cfg["agents"])
     creators = list(cfg["bosses"]) + [cfg["owner"]]
-    return workers, creators, workers + creators + list(cfg.get("viewers", []))
+    names = workers + creators + list(cfg.get("viewers") or [])
+    bad = [n for n in names if not isinstance(n, str) or n == "system" or not NAME_RE.match(n)]
+    if bad:  # "system" is the internal actor with owner-level move rights
+        raise ValueError(f"bad name(s) in config: {bad}; use letters, digits, _ . - (and not 'system')")
+    return workers, creators, names
 
 
 def load_cfg() -> dict:
@@ -124,6 +132,7 @@ def db() -> sqlite3.Connection:
 
 def init_db() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    os.chmod(DATA_DIR, 0o700)  # cards and backups are private to this OS user
     c = db()
     c.execute("PRAGMA journal_mode=WAL")
     c.execute("PRAGMA synchronous=NORMAL")
@@ -145,7 +154,8 @@ def _text(d: dict, key: str, limit: int, required: bool = False) -> str:
         v = ""
     if not isinstance(v, str):
         raise KBError(400, f"{key} must be a string")
-    v = v.strip()
+    # drop control chars (ANSI/C1 escapes would reach terminals via `ls`/`show`); keep newline and tab
+    v = "".join(ch for ch in v if ch in "\n\t" or unicodedata.category(ch) != "Cc").strip()
     if required and not v:
         raise KBError(400, f"{key} is required")
     if len(v) > limit:
@@ -314,6 +324,8 @@ class Board:
                 elif key in (("doing", "blocked"), ("todo", "blocked")):
                     if not (me or priv):
                         raise KBError(403, "only the assignee may block")
+                    if actor == "system" and frm == "doing" and r["updated"] + r["ttl"] >= now:
+                        raise KBError(409, "touched since the reaper looked; not stale")  # reap() race
                     if not question:
                         raise KBError(400, "question is required")
                     upd["question"] = question
@@ -768,6 +780,8 @@ function describe(e){
 
 function render(data){
   lastData=data; const [cards,acts]=data;
+  const ids=new Set(cards.map(c=>c.id)), gone=Object.keys(folded).filter(k=>!ids.has(k));  // forget deleted cards
+  if(gone.length){gone.forEach(k=>delete folded[k]);try{localStorage.setItem(FOLD,JSON.stringify(folded))}catch(e){}}
   const owner=isOwner();
   const stalled=cards.filter(c=>c.stalled).length, blocked=cards.filter(c=>c.column==="blocked").length;
   document.title=(stalled||blocked?"("+(stalled||blocked)+") ":"")+"unikan";
@@ -834,13 +848,15 @@ async function load(){
   }
 }
 function showLogin(){$("login").hidden=false;$("app").hidden=true;$("logout").hidden=true;$("new").hidden=true;$("tok").focus()}
-function logout(){sessionStorage.removeItem(KEY);localStorage.removeItem(KEY);token=null;ME=null;lastSig="";showLogin()}
+function logout(){gen++;if(ctl)ctl.abort();sessionStorage.removeItem(KEY);localStorage.removeItem(KEY);token=null;ME=null;lastSig="";showLogin()}
 
 function setLive(on,txt){live=on;$("live").classList.toggle("on",on);$("livetxt").textContent=txt}
+let gen=0, ctl=null;
 async function stream(){
-  while(token){
+  const my=++gen; if(ctl)ctl.abort(); ctl=new AbortController(); const sig=ctl.signal;  // one stream loop only
+  while(token&&my===gen){
     try{
-      const r=await fetch("/stream",{headers:{Authorization:"Bearer "+token}});
+      const r=await fetch("/stream",{headers:{Authorization:"Bearer "+token},signal:sig});
       if(r.status===401){logout();toast("Token tidak dikenal. Masukkan lagi.");return}
       if(!r.ok)throw new Error("status "+r.status);
       setLive(true,"langsung"); load();
@@ -851,6 +867,7 @@ async function stream(){
         let i; while((i=buf.indexOf("\n\n"))>=0){const block=buf.slice(0,i);buf=buf.slice(i+2);if(block.includes("event: change"))load()}
       }
     }catch(e){}
+    if(my!==gen)return;
     setLive(false,"menyambung ulang…");
     await new Promise(r=>setTimeout(r,3000));
   }
@@ -892,6 +909,7 @@ token=tok(); if(token){load();stream()} else showLogin();
 def make_handler(board: Board):
     class H(BaseHTTPRequestHandler):
         server_version = "unikan"
+        timeout = 60  # idle/slow sockets (no headers, trickled body) free their thread; streams ping every 15s
 
         def log_message(self, fmt, *a):
             sys.stderr.write("%s %s\n" % (self.address_string(), fmt % a))
@@ -905,7 +923,12 @@ def make_handler(board: Board):
             self.wfile.write(data)
 
         def _body(self) -> dict:
-            n = int(self.headers.get("Content-Length") or 0)
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                raise KBError(400, "bad Content-Length")
+            if n < 0:  # rfile.read(-1) would block until the client hangs up
+                raise KBError(400, "bad Content-Length")
             if n > MAX_BODY:
                 raise KBError(413, "body too large")
             if n == 0:
@@ -928,6 +951,8 @@ def make_handler(board: Board):
                     self.send_header("Content-Type", "text/html; charset=utf-8")
                     self.send_header("Content-Length", str(len(data)))
                     self.send_header("Cache-Control", "no-store")
+                    self.send_header("Content-Security-Policy", "frame-ancestors 'none'")  # no clickjacking of owner buttons
+                    self.send_header("X-Frame-Options", "DENY")
                     self.end_headers()
                     return self.wfile.write(data)
                 if method == "GET" and parts == ["health"]:
@@ -1128,8 +1153,10 @@ def init_cmd(args) -> None:
     cfg = dict(DEFAULT_CFG)
     cfg.update(owner=args.owner, agents=split(args.agents), bosses=split(args.bosses),
                port=args.port, url=f"http://127.0.0.1:{args.port}")
-    if not args.owner or " " in args.owner:
-        sys.exit("unikan: --owner must be one word")
+    try:
+        roles(cfg)
+    except ValueError as e:
+        sys.exit(f"unikan: {e}")
     CONF_DIR.mkdir(parents=True, exist_ok=True)
     cfile.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n")
     for name in roles(cfg)[2]:
