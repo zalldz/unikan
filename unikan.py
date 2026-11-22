@@ -772,6 +772,8 @@ function describe(e){
 
 function render(data){
   lastData=data; const [cards,acts]=data;
+  const ids=new Set(cards.map(c=>c.id)), gone=Object.keys(folded).filter(k=>!ids.has(k));  // forget deleted cards
+  if(gone.length){gone.forEach(k=>delete folded[k]);try{localStorage.setItem(FOLD,JSON.stringify(folded))}catch(e){}}
   const owner=isOwner();
   const stalled=cards.filter(c=>c.stalled).length, blocked=cards.filter(c=>c.column==="blocked").length;
   document.title=(stalled||blocked?"("+(stalled||blocked)+") ":"")+"unikan";
